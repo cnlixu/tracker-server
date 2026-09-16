@@ -1,0 +1,19 @@
+[Unit]
+Description=Tracker FastAPI service
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=tracker
+Group=tracker
+WorkingDirectory=/opt/tracker
+EnvironmentFile=/opt/tracker/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/tracker/.venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

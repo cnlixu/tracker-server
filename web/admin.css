@@ -1,0 +1,205 @@
+.header-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+input[type="datetime-local"],
+input[type="text"],
+input[type="password"] {
+  width: 100%;
+  height: 42px;
+  padding: 0 11px;
+  border: 1px solid #b9c7cf;
+  border-radius: 7px;
+  background: #fff;
+  color: #17212b;
+}
+
+.range-control-grid {
+  grid-template-columns: minmax(260px, 420px) minmax(0, 1fr) 360px auto;
+  justify-content: stretch;
+}
+
+.range-control-grid > .primary-button {
+  grid-column: 4;
+}
+
+.time-range-field {
+  grid-column: 3;
+  position: relative;
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  color: #465761;
+  font-size: 0.88rem;
+  font-weight: 650;
+}
+
+
+.time-range-trigger {
+  width: 100%;
+  justify-content: space-between;
+  overflow: hidden;
+  border-color: #cbd3d8;
+  background: #f4f5f6;
+  color: #4b555c;
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.time-range-trigger:hover {
+  border-color: #aebdc6;
+  background: #eef1f2;
+}
+
+.time-range-trigger > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.calendar-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.8;
+}
+
+.time-range-popover {
+  position: absolute;
+  z-index: 1000;
+  top: calc(100% + 8px);
+  left: 0;
+  display: grid;
+  width: min(520px, calc(100vw - 48px));
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgb(34 54 69 / 18%);
+  gap: 14px;
+}
+
+.time-range-popover[hidden] {
+  display: none;
+}
+
+.time-range-popover .compact-button {
+  justify-self: end;
+}
+
+.controls {
+  overflow: visible;
+}
+
+.login-page {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+}
+
+.login-shell {
+  width: min(100%, 430px);
+}
+
+.login-panel {
+  padding: 34px;
+}
+
+.login-panel h1 {
+  margin-bottom: 10px;
+}
+
+.login-intro {
+  margin-bottom: 24px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.login-panel form {
+  display: grid;
+  gap: 17px;
+}
+
+.login-panel .primary-button {
+  margin-top: 4px;
+}
+
+.management-panel {
+  padding: 22px;
+}
+
+.table-scroll {
+  margin-top: 18px;
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+th,
+td {
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+th {
+  background: #f6f8f9;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.device-name-input {
+  min-width: 150px;
+}
+
+.compact-button {
+  min-height: 36px;
+  padding: 7px 12px;
+  white-space: nowrap;
+}
+
+@media (max-width: 840px) {
+  .range-control-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .time-range-field,
+  .range-control-grid .primary-button {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 620px) {
+  .time-range-popover {
+    width: 100%;
+  }
+
+  .page-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .login-panel {
+    padding: 25px;
+  }
+}

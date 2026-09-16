@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tracker 设备监控</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous">
+  <link rel="stylesheet" href="./style.css?v=4">
+  <link rel="stylesheet" href="./admin.css?v=4">
+</head>
+<body>
+  <header class="page-header">
+    <div>
+      <p class="eyebrow">GNSS TRACKER</p>
+      <h1>设备位置与历史轨迹</h1>
+    </div>
+    <nav class="header-actions" aria-label="主要导航">
+      <button id="open-device-management" class="secondary-button" type="button">设备管理</button>
+      <button id="refresh-devices" class="secondary-button" type="button">刷新设备</button>
+      <button id="logout-button" class="secondary-button" type="button">退出登录</button>
+    </nav>
+  </header>
+
+  <main class="page-content">
+    <section class="panel controls" aria-labelledby="query-heading">
+      <h2 id="query-heading">轨迹查询</h2>
+      <div class="control-grid range-control-grid">
+        <label>
+          <span>设备</span>
+          <select id="device-select" disabled>
+            <option value="">正在加载设备…</option>
+          </select>
+        </label>
+        <div id="time-range-field" class="time-range-field">
+          <span class="field-label">时间范围（北京时间）</span>
+          <button id="time-range-trigger" class="time-range-trigger" type="button"
+                  aria-expanded="false" aria-controls="time-range-popover">
+            <span id="time-range-display">正在设置时间范围…</span>
+            <svg class="calendar-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7 2v3m10-3v3M3.5 9h17M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" />
+            </svg>
+          </button>
+          <div id="time-range-popover" class="time-range-popover" hidden>
+            <label><span>开始时间</span><input id="track-start" type="datetime-local" step="60"></label>
+            <label><span>结束时间</span><input id="track-end" type="datetime-local" step="60"></label>
+            <button id="time-range-done" class="primary-button compact-button" type="button">完成</button>
+          </div>
+        </div>
+        <button id="query-track" class="primary-button" type="button" disabled>查询轨迹</button>
+      </div>
+      <p id="page-message" class="message" role="status" aria-live="polite">正在加载设备列表…</p>
+    </section>
+
+    <div class="dashboard-grid">
+      <section class="panel device-panel" aria-labelledby="device-heading">
+        <div class="section-heading">
+          <h2 id="device-heading">设备最新状态</h2>
+          <span id="online-status" class="status-badge status-unknown">未知</span>
+        </div>
+        <dl class="detail-grid">
+          <div><dt>IMEI</dt><dd id="device-imei">—</dd></div>
+          <div><dt>设备名称</dt><dd id="device-name">—</dd></div>
+          <div><dt>最后上线</dt><dd id="last-seen">—</dd></div>
+          <div><dt>最后 GNSS 时间</dt><dd id="last-gps-time">—</dd></div>
+          <div><dt>定位状态</dt><dd id="valid-status">—</dd></div>
+          <div><dt>经纬度（WGS84）</dt><dd id="coordinates">—</dd></div>
+          <div><dt>海拔</dt><dd id="altitude">—</dd></div>
+          <div><dt>速度</dt><dd id="speed">—</dd></div>
+          <div><dt>航向</dt><dd id="course">—</dd></div>
+          <div><dt>卫星数</dt><dd id="satellites">—</dd></div>
+          <div><dt>HDOP</dt><dd id="hdop">—</dd></div>
+          <div><dt>4G CSQ</dt><dd id="csq">—</dd></div>
+          <div><dt>wake_code</dt><dd id="wake-code">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="panel track-panel" aria-labelledby="track-heading">
+        <h2 id="track-heading">轨迹概览</h2>
+        <dl class="track-summary">
+          <div><dt>轨迹点数量</dt><dd id="track-count">0</dd></div>
+          <div><dt>起始时间</dt><dd id="track-start-time">—</dd></div>
+          <div><dt>结束时间</dt><dd id="track-end-time">—</dd></div>
+          <div><dt>起点位置</dt><dd id="track-start-position">—</dd></div>
+          <div><dt>终点位置</dt><dd id="track-end-position">—</dd></div>
+        </dl>
+      </section>
+    </div>
+
+    <section class="panel map-panel" aria-labelledby="map-heading">
+      <div class="section-heading">
+        <h2 id="map-heading">轨迹地图</h2>
+        <span class="map-note">WGS84 · OpenStreetMap</span>
+      </div>
+      <div id="map" aria-label="设备历史轨迹地图"></div>
+    </section>
+  </main>
+
+  <footer class="page-footer">所有时间均按北京时间（UTC+8）显示</footer>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
+  <script src="./app.js?v=3"></script>
+</body>
+</html>

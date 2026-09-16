@@ -1,0 +1,20 @@
+[Unit]
+Description=Tracker TCP ingestion service
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=tracker
+Group=tracker
+WorkingDirectory=/opt/tracker
+EnvironmentFile=/opt/tracker/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/tracker/.venv/bin/python -m backend.app.tcp_server
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

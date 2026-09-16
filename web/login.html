@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>管理员登录 · Tracker</title>
+  <link rel="stylesheet" href="./style.css?v=3">
+  <link rel="stylesheet" href="./admin.css?v=3">
+</head>
+<body class="login-page">
+  <main class="login-shell">
+    <section class="panel login-panel" aria-labelledby="login-heading">
+      <p class="eyebrow">GNSS TRACKER</p>
+      <h1 id="login-heading">管理员登录</h1>
+      <p class="login-intro">登录后可查看设备状态、管理设备别名和查询历史轨迹。</p>
+      <form id="login-form" novalidate>
+        <label><span>用户名</span><input id="username" name="username" type="text" autocomplete="username" maxlength="64" required autofocus></label>
+        <label><span>密码</span><input id="password" name="password" type="password" autocomplete="current-password" maxlength="256" required></label>
+        <button id="login-button" class="primary-button" type="submit">登录</button>
+      </form>
+      <p id="login-message" class="message" role="alert" aria-live="polite"></p>
+    </section>
+  </main>
+  <script src="./login.js"></script>
+</body>
+</html>

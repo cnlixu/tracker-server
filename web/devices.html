@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>设备管理 · Tracker</title>
+  <link rel="stylesheet" href="./style.css?v=3">
+  <link rel="stylesheet" href="./admin.css?v=3">
+</head>
+<body>
+  <header class="page-header">
+    <div><p class="eyebrow">GNSS TRACKER</p><h1>设备管理</h1></div>
+    <nav class="header-actions" aria-label="主要导航">
+      <button id="open-track-map" class="secondary-button" type="button">轨迹地图</button>
+      <button id="refresh-devices" class="secondary-button" type="button">刷新</button>
+      <button id="logout-button" class="secondary-button" type="button">退出登录</button>
+    </nav>
+  </header>
+  <main class="page-content">
+    <section class="panel management-panel" aria-labelledby="devices-heading">
+      <div class="section-heading"><h2 id="devices-heading">全部设备</h2><span id="device-total" class="map-note">0 台</span></div>
+      <p id="management-message" class="message" role="status" aria-live="polite">正在加载设备…</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>IMEI</th><th>设备别名</th><th>状态</th><th>最后上线（北京时间）</th><th>最后位置（WGS84）</th><th>卫星 / HDOP / CSQ</th><th>操作</th></tr></thead>
+          <tbody id="device-table-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <footer class="page-footer">设备别名最多 64 个字符；留空可清除别名</footer>
+  <script src="./devices.js?v=2"></script>
+</body>
+</html>
