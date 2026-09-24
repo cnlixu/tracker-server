@@ -1,4 +1,9 @@
-"""Async PostgreSQL persistence for tracker reports."""
+"""Async PostgreSQL persistence for tracker reports.
+
+Legacy ASCII V1 reports are stored through :func:`save_report`. Binary V2
+frames and ASCII V3 reports are stored through :func:`save_records`, which adds
+the per-record identity columns used for idempotent re-delivery.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,7 @@ from pathlib import Path
 import asyncpg
 
 from .config import DatabaseSettings, load_database_settings
-from .models import TrackerReport
+from .models import TrackerRecord, TrackerReport
 
 
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "sql" / "schema.sql"
@@ -20,6 +25,20 @@ INSERT INTO track_points (
     satellites, hdop, csq, wake_code, raw_data
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+RETURNING id
+"""
+
+INSERT_POSITION_RECORD_SQL = """
+INSERT INTO track_points (
+    imei, gps_time, valid, latitude, longitude, altitude, speed, course,
+    satellites, hdop, csq, wake_code, raw_data,
+    generation_id, record_seq, batch_id, battery_mv, time_valid
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+    $17, $18
+)
+ON CONFLICT (imei, generation_id, record_seq) DO NOTHING
 RETURNING id
 """
 
@@ -248,6 +267,60 @@ def report_to_device_params(report: TrackerReport) -> tuple[object, ...]:
     return history_params[:12]
 
 
+def record_to_track_point_params(
+    imei: str,
+    generation_id: int,
+    batch_id: int,
+    record: TrackerRecord,
+) -> tuple[object, ...]:
+    """Map a position record to the positional parameters of its insert."""
+    _validate_imei(imei)
+    if not record.raw_data:
+        raise DatabaseValueError("raw_data must not be empty")
+    return (
+        imei,
+        _as_utc(record.gps_time),
+        record.valid,
+        record.latitude,
+        record.longitude,
+        record.altitude,
+        record.speed,
+        record.course,
+        record.satellites,
+        record.hdop,
+        record.csq,
+        record.wake_code,
+        record.raw_data,
+        generation_id,
+        record.sequence,
+        batch_id,
+        record.battery_mv,
+        record.time_valid,
+    )
+
+
+def record_to_device_params(
+    imei: str,
+    record: TrackerRecord,
+) -> tuple[object, ...]:
+    """Map a position record to the positional parameters of the device upsert."""
+    _validate_imei(imei)
+    return (
+        imei,
+        _as_utc(record.gps_time),
+        record.valid,
+        record.latitude,
+        record.longitude,
+        record.altitude,
+        record.speed,
+        record.course,
+        record.satellites,
+        record.hdop,
+        record.csq,
+        record.wake_code,
+    )
+
+
 async def insert_track_point(
     pool: asyncpg.Pool,
     report: TrackerReport,
@@ -273,6 +346,42 @@ async def save_report(pool: asyncpg.Pool, report: TrackerReport) -> int:
             track_point_id = await _insert_track_point(connection, report)
             await _upsert_device_latest(connection, report)
     return track_point_id
+
+
+async def save_records(
+    pool: asyncpg.Pool,
+    *,
+    imei: str,
+    generation_id: int,
+    batch_id: int,
+    records: tuple[TrackerRecord, ...] | list[TrackerRecord],
+) -> int:
+    """Store records and the device snapshot atomically, idempotently.
+
+    Each record is keyed by ``(imei, generation_id, record_seq)``, so a batch
+    that the device re-sends after a lost acknowledgement only stores what is
+    still missing. The returned count is the number of newly inserted records;
+    an entirely duplicated batch returns ``0``.
+    """
+    if not records:
+        raise DatabaseValueError("records must not be empty")
+    _validate_imei(imei)
+    ordered = sorted(records, key=lambda record: record.sequence)
+
+    inserted = 0
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            for record in ordered:
+                if await _insert_position_record(
+                    connection,
+                    imei,
+                    generation_id,
+                    batch_id,
+                    record,
+                ):
+                    inserted += 1
+            await _upsert_device_from_record(connection, imei, ordered[-1])
+    return inserted
 
 
 async def get_devices(pool: asyncpg.Pool) -> list[DeviceSnapshot]:
@@ -367,6 +476,33 @@ async def _upsert_device_latest(
     await connection.execute(
         UPSERT_DEVICE_LATEST_SQL,
         *report_to_device_params(report),
+    )
+
+
+async def _insert_position_record(
+    connection: asyncpg.Connection,
+    imei: str,
+    generation_id: int,
+    batch_id: int,
+    record: TrackerRecord,
+) -> bool:
+    """Insert one record; return ``False`` when it was already stored."""
+    row_id = await connection.fetchval(
+        INSERT_POSITION_RECORD_SQL,
+        *record_to_track_point_params(imei, generation_id, batch_id, record),
+    )
+    # ON CONFLICT DO NOTHING returns no row for an already stored record.
+    return row_id is not None
+
+
+async def _upsert_device_from_record(
+    connection: asyncpg.Connection,
+    imei: str,
+    record: TrackerRecord,
+) -> None:
+    await connection.execute(
+        UPSERT_DEVICE_LATEST_SQL,
+        *record_to_device_params(imei, record),
     )
 
 

@@ -37,5 +37,20 @@ CREATE TABLE IF NOT EXISTS track_points (
 CREATE INDEX IF NOT EXISTS idx_track_points_imei_gps_time
     ON track_points (imei, gps_time);
 
+-- Binary V2 frames and ASCII V3 reports carry a per-record identity, so the
+-- server can acknowledge a batch and stay idempotent when the device re-sends
+-- it after a lost acknowledgement. Legacy ASCII V1 rows keep these columns
+-- NULL, which never conflicts in a unique index.
+-- speed is in knots, matching the tracker's GNSS RMC field; binary records are
+-- converted from the centimetres-per-second value on the wire.
+ALTER TABLE track_points ADD COLUMN IF NOT EXISTS generation_id BIGINT;
+ALTER TABLE track_points ADD COLUMN IF NOT EXISTS record_seq BIGINT;
+ALTER TABLE track_points ADD COLUMN IF NOT EXISTS batch_id BIGINT;
+ALTER TABLE track_points ADD COLUMN IF NOT EXISTS battery_mv INTEGER;
+ALTER TABLE track_points ADD COLUMN IF NOT EXISTS time_valid BOOLEAN;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_track_points_record_identity
+    ON track_points (imei, generation_id, record_seq);
+
 -- Future protocol versions may add nullable seq BIGINT and battery_mv INTEGER
 -- columns. Add a composite uniqueness rule only after seq semantics are defined.

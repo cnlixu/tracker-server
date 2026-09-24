@@ -24,6 +24,13 @@ STANDARD_BODY = (
 )
 STANDARD_MESSAGE = f"${STANDARD_BODY}*69"
 
+# The V3 example published by the tracker firmware, including its checksum.
+V3_BODY = (
+    "PTRK,3,862288087606784,305419896,1788251489,1788251489,010926,083129,"
+    "A,1,3045.81768,N,10354.07883,E,516.2,0.591,152.99,15,0.80,31,3700,1"
+)
+V3_MESSAGE = f"${V3_BODY}*76"
+
 
 def build_message(body: str) -> str:
     return f"${body}*{generate_checksum(body)}"
@@ -235,3 +242,94 @@ def test_v_coordinate_and_hemisphere_must_be_present_together() -> None:
 def test_bytes_and_crlf_are_accepted() -> None:
     report = parse_message(f"{STANDARD_MESSAGE}\r\n".encode("ascii"))
     assert report.raw_data == STANDARD_MESSAGE
+
+
+def test_v1_report_has_no_record_identity() -> None:
+    report = parse_message(STANDARD_MESSAGE)
+
+    assert report.protocol_version == 1
+    assert report.generation_id is None
+    assert report.record_sequence is None
+    assert report.batch_id is None
+    assert report.time_valid is None
+    assert report.battery_mv is None
+
+
+def test_v3_report_from_the_firmware_readme() -> None:
+    report = parse_message(V3_MESSAGE)
+
+    assert report.protocol_version == 3
+    assert report.imei == "862288087606784"
+    assert report.generation_id == 305419896
+    assert report.record_sequence == 1788251489
+    assert report.batch_id == 1788251489
+    assert report.gps_time == datetime(2026, 9, 1, 8, 31, 29, tzinfo=timezone.utc)
+    assert report.valid is True
+    assert report.time_valid is True
+    assert report.latitude == pytest.approx(30.763628)
+    assert report.longitude == pytest.approx(103.9013138)
+    assert report.altitude == 516.2
+    assert report.speed == 0.591
+    assert report.course == 152.99
+    assert report.satellites == 15
+    assert report.hdop == pytest.approx(0.80)
+    assert report.csq == 31
+    assert report.battery_mv == 3700
+    assert report.wake_code == 1
+    assert report.raw_data == V3_MESSAGE
+
+
+def test_v3_bytes_with_crlf_are_accepted() -> None:
+    report = parse_message(f"{V3_MESSAGE}\r\n".encode("ascii"))
+    assert report.raw_data == V3_MESSAGE
+    assert report.battery_mv == 3700
+
+
+def test_v3_status_v_allows_empty_gnss_and_unknown_time() -> None:
+    fields = V3_BODY.split(",")
+    fields[8] = "V"
+    fields[9] = "0"
+    fields[10:19] = [""] * 9
+    report = parse_message(build_message(",".join(fields)))
+
+    assert report.valid is False
+    assert report.time_valid is False
+    assert report.latitude is None
+    assert report.longitude is None
+    assert report.altitude is None
+    assert report.speed is None
+    assert report.course is None
+    assert report.satellites is None
+    assert report.hdop is None
+    assert report.csq == 31
+    assert report.battery_mv == 3700
+    assert report.record_sequence == 1788251489
+
+
+def test_v3_time_valid_flag_must_be_zero_or_one() -> None:
+    fields = V3_BODY.split(",")
+    fields[9] = "2"
+    with pytest.raises(FieldError, match="time_valid"):
+        parse_message(build_message(",".join(fields)))
+
+
+def test_v3_identity_fields_must_be_numeric() -> None:
+    fields = V3_BODY.split(",")
+    fields[3] = "abc"
+    with pytest.raises(FieldError, match="generation_id"):
+        parse_message(build_message(",".join(fields)))
+
+
+def test_v1_field_count_with_v3_version_is_rejected() -> None:
+    body = replace_field(1, "3")
+    with pytest.raises(UnsupportedVersionError, match="version: 3"):
+        parse_message(build_message(body))
+
+
+def test_unexpected_field_count_reports_both_layouts() -> None:
+    body = ",".join(V3_BODY.split(",")[:-1])
+    with pytest.raises(
+        ProtocolFormatError,
+        match=r"requires 17 fields for V1 or 22 for V3",
+    ):
+        parse_message(build_message(body))

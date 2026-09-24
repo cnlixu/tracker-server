@@ -1,4 +1,9 @@
-"""Reliable, transport-independent parsing for the PTRK V1 protocol."""
+"""Reliable, transport-independent parsing for the PTRK ASCII protocol.
+
+Both the legacy V1 layout (17 fields) and the V3 layout emitted by the tracker
+firmware (22 fields, with generation/batch identity and battery voltage) are
+supported. The binary V2 protocol lives in :mod:`backend.app.binary_protocol`.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +16,9 @@ from .models import TrackerReport
 
 PTRK_MESSAGE_TYPE = "PTRK"
 SUPPORTED_PROTOCOL_VERSION = 1
+V3_PROTOCOL_VERSION = 3
 V1_FIELD_COUNT = 17
+V3_FIELD_COUNT = 22
 
 _CHECKSUM_PATTERN = re.compile(r"[0-9A-Fa-f]{2}")
 _IMEI_PATTERN = re.compile(r"[0-9]{15}")
@@ -142,10 +149,11 @@ def nmea_to_decimal(value: str, hemisphere: str) -> float:
 
 
 def parse_message(frame: str | bytes) -> TrackerReport:
-    """Validate and parse one complete PTRK V1 report.
+    """Validate and parse one complete PTRK ASCII report.
 
-    An optional trailing CR/LF transport terminator is removed. ``raw_data``
-    retains the complete logical report from ``$`` through ``*XX``.
+    V1 (17 fields) and V3 (22 fields) bodies are both accepted. An optional
+    trailing CR/LF transport terminator is removed. ``raw_data`` retains the
+    complete logical report from ``$`` through ``*XX``.
     """
     raw_data = _to_ascii_text(frame).rstrip("\r\n")
     if not raw_data.startswith("$"):
@@ -161,15 +169,36 @@ def parse_message(frame: str | bytes) -> TrackerReport:
     validate_checksum(body, supplied_checksum)
 
     fields = body.split(",")
-    if len(fields) != V1_FIELD_COUNT:
-        raise ProtocolFormatError(
-            f"PTRK V1 requires {V1_FIELD_COUNT} fields, received {len(fields)}"
+    if len(fields) == V1_FIELD_COUNT:
+        return _parse_report(
+            fields,
+            raw_data,
+            expected_version=SUPPORTED_PROTOCOL_VERSION,
         )
+    if len(fields) == V3_FIELD_COUNT:
+        return _parse_report(
+            fields,
+            raw_data,
+            expected_version=V3_PROTOCOL_VERSION,
+        )
+    raise ProtocolFormatError(
+        f"PTRK requires {V1_FIELD_COUNT} fields for V1 or "
+        f"{V3_FIELD_COUNT} for V3, received {len(fields)}"
+    )
+
+
+def _parse_report(
+    fields: list[str],
+    raw_data: str,
+    *,
+    expected_version: int,
+) -> TrackerReport:
+    """Parse a field list whose layout is selected by its protocol version."""
     if fields[0] != PTRK_MESSAGE_TYPE:
         raise ProtocolFormatError(f"unsupported message type: {fields[0]!r}")
 
     protocol_version = _parse_required_int(fields[1], "protocol_version")
-    if protocol_version != SUPPORTED_PROTOCOL_VERSION:
+    if protocol_version != expected_version:
         raise UnsupportedVersionError(
             f"unsupported PTRK protocol version: {protocol_version}"
         )
@@ -178,34 +207,114 @@ def parse_message(frame: str | bytes) -> TrackerReport:
     if _IMEI_PATTERN.fullmatch(imei) is None:
         raise FieldError("IMEI must contain exactly 15 ASCII decimal digits")
 
-    status = fields[5]
-    if status not in {"A", "V"}:
-        raise FieldError(f"valid status must be 'A' or 'V': {status!r}")
-    valid = status == "A"
+    if expected_version == V3_PROTOCOL_VERSION:
+        return _parse_v3_report(fields, raw_data, protocol_version, imei)
+    return _parse_v1_report(fields, raw_data, protocol_version, imei)
 
-    latitude = _parse_coordinate_pair(
-        fields[6], fields[7], "latitude", {"N", "S"}, required=valid
-    )
-    longitude = _parse_coordinate_pair(
-        fields[8], fields[9], "longitude", {"E", "W"}, required=valid
-    )
 
+def _parse_v1_report(
+    fields: list[str],
+    raw_data: str,
+    protocol_version: int,
+    imei: str,
+) -> TrackerReport:
+    """Parse the legacy V1 layout: no record identity, no battery voltage."""
+    valid, gnss = _parse_gnss_block(fields, fields[5], 6)
     return TrackerReport(
         protocol_version=protocol_version,
         imei=imei,
         gps_time=parse_utc_datetime(fields[3], fields[4]),
         valid=valid,
-        latitude=latitude,
-        longitude=longitude,
-        altitude=_parse_optional_float(fields[10], "altitude", required=valid),
-        speed=_parse_optional_float(fields[11], "speed", required=valid),
-        course=_parse_optional_float(fields[12], "course", required=valid),
-        satellites=_parse_optional_int(fields[13], "satellites", required=valid),
-        hdop=_parse_optional_float(fields[14], "HDOP", required=valid),
+        latitude=gnss[0],
+        longitude=gnss[1],
+        altitude=gnss[2],
+        speed=gnss[3],
+        course=gnss[4],
+        satellites=gnss[5],
+        hdop=gnss[6],
         csq=_parse_required_int(fields[15], "CSQ"),
         wake_code=_parse_required_int(fields[16], "wake_code"),
         raw_data=raw_data,
     )
+
+
+def _parse_v3_report(
+    fields: list[str],
+    raw_data: str,
+    protocol_version: int,
+    imei: str,
+) -> TrackerReport:
+    """Parse the V3 layout emitted by the tracker firmware."""
+    valid, gnss = _parse_gnss_block(fields, fields[8], 10)
+    return TrackerReport(
+        protocol_version=protocol_version,
+        imei=imei,
+        gps_time=parse_utc_datetime(fields[6], fields[7]),
+        valid=valid,
+        latitude=gnss[0],
+        longitude=gnss[1],
+        altitude=gnss[2],
+        speed=gnss[3],
+        course=gnss[4],
+        satellites=gnss[5],
+        hdop=gnss[6],
+        csq=_parse_required_int(fields[19], "CSQ"),
+        wake_code=_parse_required_int(fields[21], "wake_code"),
+        raw_data=raw_data,
+        generation_id=_parse_required_int(fields[3], "generation_id"),
+        record_sequence=_parse_required_int(fields[4], "record_sequence"),
+        batch_id=_parse_required_int(fields[5], "batch_id"),
+        time_valid=_parse_flag(fields[9], "time_valid"),
+        battery_mv=_parse_required_int(fields[20], "battery_mv"),
+    )
+
+
+def _parse_gnss_block(
+    fields: list[str],
+    status: str,
+    offset: int,
+) -> tuple[bool, tuple[
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    int | None,
+    float | None,
+]]:
+    """Parse the nine consecutive GNSS fields shared by V1 and V3."""
+    if status not in {"A", "V"}:
+        raise FieldError(f"valid status must be 'A' or 'V': {status!r}")
+    valid = status == "A"
+
+    latitude = _parse_coordinate_pair(
+        fields[offset], fields[offset + 1], "latitude", {"N", "S"}, required=valid
+    )
+    longitude = _parse_coordinate_pair(
+        fields[offset + 2],
+        fields[offset + 3],
+        "longitude",
+        {"E", "W"},
+        required=valid,
+    )
+    return valid, (
+        latitude,
+        longitude,
+        _parse_optional_float(fields[offset + 4], "altitude", required=valid),
+        _parse_optional_float(fields[offset + 5], "speed", required=valid),
+        _parse_optional_float(fields[offset + 6], "course", required=valid),
+        _parse_optional_int(fields[offset + 7], "satellites", required=valid),
+        _parse_optional_float(fields[offset + 8], "HDOP", required=valid),
+    )
+
+
+def _parse_flag(value: str, name: str) -> bool:
+    if value == "1":
+        return True
+    if value == "0":
+        return False
+    raise FieldError(f"{name} must be 0 or 1: {value!r}")
+
 
 
 def _parse_coordinate_pair(

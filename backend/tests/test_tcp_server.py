@@ -5,6 +5,18 @@ from typing import Any
 
 import pytest
 
+from backend.app.binary_protocol import (
+    STATUS_BAD_RECORD,
+    STATUS_OK,
+    STATUS_STORAGE_FAILED,
+    STATUS_UNSUPPORTED_VERSION,
+    TrackerBatch,
+    build_position_frame,
+    crc16_ccitt,
+    decode_record,
+    encode_record,
+    imei_to_bcd,
+)
 from backend.app.config import TCPSettings
 from backend.app.models import TrackerReport
 from backend.app.tcp_server import (
@@ -12,6 +24,7 @@ from backend.app.tcp_server import (
     ACK_OK,
     FrameBuffer,
     FrameTooLargeError,
+    ReportStreamParser,
     TrackerTCPServer,
 )
 
@@ -21,17 +34,63 @@ STANDARD_MESSAGE = (
     b"10354.09348,E,575.0,0.111,193.85,9,2.21,31,1*69"
 )
 
+# ASCII V3 report published by the tracker firmware, terminated by CR/LF.
+V3_MESSAGE = (
+    b"$PTRK,3,862288087606784,305419896,1788251489,1788251489,010926,083129,"
+    b"A,1,3045.81768,N,10354.07883,E,516.2,0.591,152.99,15,0.80,31,3700,1*76"
+)
+
+IMEI = "862288087606784"
+GENERATION_ID = 0x12345678
+BATCH_ID = 1788251489
+UPLOAD_FRAME_HEX = (
+    "A55A0101310002862288087606784F78563412618D966A0100"
+    "618D966A618D966A382856121215EE3D04021E00C33B740E080F1F0BEA51"
+    "77FE"
+)
+RECORD_HEX = "618D966A618D966A382856121215EE3D04021E00C33B740E080F1F0BEA51"
+
+
+def upload_frame() -> bytes:
+    return bytes.fromhex(UPLOAD_FRAME_HEX)
+
+
+def parse_binary_ack(data: bytes) -> dict[str, Any]:
+    """Decode an acknowledgement frame, asserting its wire-level invariants."""
+    assert data[0:2] == b"\xa5\x5a"
+    assert data[2:4] == bytes([0x01, 0x81])
+    payload_length = int.from_bytes(data[4:6], "little")
+    assert payload_length == 24
+    assert len(data) == payload_length + 8
+    assert crc16_ccitt(data[2:30]) == int.from_bytes(data[30:32], "little")
+    return {
+        "version": data[6],
+        "device_id": data[7:15],
+        "generation_id": int.from_bytes(data[15:19], "little"),
+        "batch_id": int.from_bytes(data[19:23], "little"),
+        "count": int.from_bytes(data[23:25], "little"),
+        "status": data[25],
+        "server_time": int.from_bytes(data[26:30], "little"),
+    }
+
 
 class FakeService:
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error
         self.reports: list[TrackerReport] = []
+        self.batches: list[TrackerBatch] = []
 
     async def process_report(self, report: TrackerReport) -> int:
         self.reports.append(report)
         if self.error is not None:
             raise self.error
         return 42
+
+    async def process_batch(self, batch: TrackerBatch) -> int:
+        self.batches.append(batch)
+        if self.error is not None:
+            raise self.error
+        return batch.record_count
 
 
 class FakeWriter:
@@ -216,3 +275,147 @@ def test_idle_client_is_closed_after_read_timeout() -> None:
 
     assert service.reports == []
     assert writer.closed is True
+
+
+def sample_record() -> bytes:
+    return encode_record(decode_record(bytes.fromhex(RECORD_HEX)))
+
+
+def test_stream_parser_selects_the_binary_framer() -> None:
+    parser = ReportStreamParser()
+
+    assert parser.feed(b"") == []
+    assert parser.feed(upload_frame()) == [upload_frame()]
+    assert parser.uses_binary_frames is True
+    assert parser.ascii_buffer is None
+
+
+def test_stream_parser_selects_the_ascii_framer() -> None:
+    parser = ReportStreamParser()
+
+    assert parser.feed(STANDARD_MESSAGE + b"\n") == [STANDARD_MESSAGE]
+    assert parser.uses_binary_frames is False
+    assert parser.ascii_buffer is not None
+    assert parser.dropped_binary_bytes == 0
+
+
+def test_binary_upload_frame_is_persisted_and_acknowledged() -> None:
+    service = FakeService()
+    writer = asyncio.run(run_client([upload_frame()], service))
+
+    assert len(service.batches) == 1
+    batch = service.batches[0]
+    assert batch.imei == IMEI
+    assert batch.generation_id == GENERATION_ID
+    assert batch.batch_id == BATCH_ID
+    assert batch.record_count == 1
+
+    ack = parse_binary_ack(bytes(writer.output))
+    assert ack["version"] == 2
+    assert ack["status"] == STATUS_OK
+    assert ack["count"] == 1
+    assert ack["device_id"] == imei_to_bcd(IMEI)
+    assert ack["generation_id"] == GENERATION_ID
+    assert ack["batch_id"] == BATCH_ID
+    assert writer.closed is True
+
+
+def test_binary_frame_split_across_reads_is_reassembled() -> None:
+    service = FakeService()
+    frame = upload_frame()
+    writer = asyncio.run(run_client([frame[:19], frame[19:]], service))
+
+    assert len(service.batches) == 1
+    assert parse_binary_ack(bytes(writer.output))["count"] == 1
+
+
+def test_binary_multi_record_batch_reports_its_count() -> None:
+    service = FakeService()
+    frame = build_position_frame(
+        imei=IMEI,
+        generation_id=GENERATION_ID,
+        batch_id=BATCH_ID,
+        records=[sample_record(), sample_record()],
+    )
+    writer = asyncio.run(run_client([frame], service))
+
+    assert service.batches[0].record_count == 2
+    assert parse_binary_ack(bytes(writer.output))["count"] == 2
+
+
+def test_binary_frame_with_bad_crc_is_not_acknowledged() -> None:
+    service = FakeService()
+    frame = bytearray(upload_frame())
+    frame[20] ^= 0xFF
+    writer = asyncio.run(run_client([bytes(frame)], service))
+
+    assert service.batches == []
+    assert bytes(writer.output) == b""
+    assert writer.closed is True
+
+
+def test_binary_frame_after_leading_junk_is_still_processed() -> None:
+    service = FakeService()
+    junk = b"\xa5\x5a\x01\x01\x00\x00"
+    writer = asyncio.run(run_client([junk + upload_frame()], service))
+
+    assert len(service.batches) == 1
+    assert parse_binary_ack(bytes(writer.output))["status"] == STATUS_OK
+
+
+def test_binary_unsupported_version_returns_status_ack() -> None:
+    service = FakeService()
+    frame = build_position_frame(
+        imei=IMEI,
+        generation_id=GENERATION_ID,
+        batch_id=BATCH_ID,
+        records=[sample_record()],
+        version=3,
+    )
+    writer = asyncio.run(run_client([frame], service))
+
+    assert service.batches == []
+    ack = parse_binary_ack(bytes(writer.output))
+    assert ack["status"] == STATUS_UNSUPPORTED_VERSION
+    assert ack["count"] == 0
+    assert ack["batch_id"] == BATCH_ID
+
+
+def test_binary_bad_record_returns_status_ack() -> None:
+    service = FakeService()
+    record = bytearray(bytes.fromhex(RECORD_HEX))
+    record[8] ^= 0x01
+    frame = build_position_frame(
+        imei=IMEI,
+        generation_id=GENERATION_ID,
+        batch_id=BATCH_ID,
+        records=[bytes(record)],
+    )
+    writer = asyncio.run(run_client([frame], service))
+
+    assert service.batches == []
+    ack = parse_binary_ack(bytes(writer.output))
+    assert ack["status"] == STATUS_BAD_RECORD
+    assert ack["count"] == 0
+
+
+def test_binary_service_error_returns_retryable_status_ack() -> None:
+    service = FakeService(RuntimeError("database unavailable"))
+    writer = asyncio.run(run_client([upload_frame()], service))
+
+    assert len(service.batches) == 1
+    ack = parse_binary_ack(bytes(writer.output))
+    assert ack["status"] == STATUS_STORAGE_FAILED
+    assert ack["count"] == 0
+
+
+def test_v3_ascii_report_is_passed_to_the_service() -> None:
+    service = FakeService()
+    writer = asyncio.run(run_client([V3_MESSAGE + b"\r\n"], service))
+
+    assert len(service.reports) == 1
+    assert service.reports[0].protocol_version == 3
+    assert service.reports[0].record_sequence == BATCH_ID
+    assert service.reports[0].battery_mv == 3700
+    assert bytes(writer.output) == ACK_OK
+
