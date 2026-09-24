@@ -3,6 +3,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 import pytest
@@ -171,6 +172,7 @@ def device_record() -> dict[str, Any]:
         "last_hdop": 2.21,
         "last_csq": 31,
         "last_wake_code": 1,
+        "last_battery_mv": 3700,
     }
 
 
@@ -192,6 +194,9 @@ def track_record() -> dict[str, Any]:
         "csq": 31,
         "wake_code": 1,
         "raw_data": STANDARD_MESSAGE,
+        "battery_mv": 3700,
+        "time_valid": True,
+        "record_seq": 1788251489,
     }
 
 
@@ -228,7 +233,7 @@ def test_tracker_report_parameter_mapping() -> None:
         1,
         STANDARD_MESSAGE,
     )
-    assert device_params == history_params[:12]
+    assert device_params == history_params[:12] + (None,)
 
 
 def test_invalid_fix_maps_nullable_gnss_fields_to_none() -> None:
@@ -411,7 +416,7 @@ def test_position_record_parameter_mapping() -> None:
         RECORD_HEX,
     )
     assert params[13:] == (GENERATION_ID, BATCH_ID, BATCH_ID, 3700, True)
-    assert record_to_device_params(IMEI, record) == params[:12]
+    assert record_to_device_params(IMEI, record) == params[:12] + (3700,)
 
 
 def test_save_records_uses_one_transaction_in_sequence_order() -> None:
@@ -569,3 +574,26 @@ def test_service_persists_a_decoded_binary_batch() -> None:
     assert params[14] == batch.records[0].sequence
     assert params[15] == batch.batch_id
     assert params[16] == 3700
+
+
+def _placeholder_count(sql: str) -> int:
+    return max(int(index) for index in re.findall(r"\$(\d+)", sql))
+
+
+def test_sql_placeholder_counts_match_mapping_functions() -> None:
+    """Each statement must consume exactly the parameters its mapper returns."""
+    report = parse_message(STANDARD_MESSAGE)
+    record = firmware_record()
+
+    assert _placeholder_count(INSERT_TRACK_POINT_SQL) == len(
+        report_to_track_point_params(report)
+    )
+    assert _placeholder_count(UPSERT_DEVICE_LATEST_SQL) == len(
+        report_to_device_params(report)
+    )
+    assert _placeholder_count(UPSERT_DEVICE_LATEST_SQL) == len(
+        record_to_device_params(IMEI, record)
+    )
+    assert _placeholder_count(INSERT_POSITION_RECORD_SQL) == len(
+        record_to_track_point_params(IMEI, GENERATION_ID, BATCH_ID, record)
+    )

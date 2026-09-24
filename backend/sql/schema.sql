@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS devices (
     last_satellites SMALLINT,
     last_hdop REAL,
     last_csq SMALLINT,
-    last_wake_code SMALLINT
+    last_wake_code SMALLINT,
+    last_battery_mv INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS track_points (
@@ -48,6 +49,9 @@ ALTER TABLE track_points ADD COLUMN IF NOT EXISTS record_seq BIGINT;
 ALTER TABLE track_points ADD COLUMN IF NOT EXISTS batch_id BIGINT;
 ALTER TABLE track_points ADD COLUMN IF NOT EXISTS battery_mv INTEGER;
 ALTER TABLE track_points ADD COLUMN IF NOT EXISTS time_valid BOOLEAN;
+
+-- The device snapshot also exposes the latest battery voltage.
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS last_battery_mv INTEGER;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_track_points_record_identity
     ON track_points (imei, generation_id, record_seq);

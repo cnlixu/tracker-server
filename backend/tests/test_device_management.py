@@ -58,6 +58,7 @@ def device_record() -> dict[str, Any]:
         "last_hdop": 2.21,
         "last_csq": 31,
         "last_wake_code": 1,
+        "last_battery_mv": 3700,
     }
 
 

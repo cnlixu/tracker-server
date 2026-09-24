@@ -81,6 +81,7 @@ def make_device(*, age_minutes: int, suffix: str = "", name: str | None = None) 
         last_hdop=2.21,
         last_csq=31,
         last_wake_code=1,
+        last_battery_mv=3700,
     )
 
 
@@ -101,6 +102,9 @@ def make_track_point(point_id: int, gps_time: datetime) -> TrackPoint:
         csq=31,
         wake_code=1,
         raw_data="$PTRK,...*00",
+        battery_mv=3700,
+        time_valid=True,
+        record_seq=1788251489,
     )
 
 
@@ -278,6 +282,35 @@ def test_device_name_can_be_updated(monkeypatch: Any) -> None:
     assert response.status_code == 200
     assert response.json()["name"] == "测试车"
     assert captured == {"imei": IMEI, "name": "测试车"}
+
+
+def test_device_and_track_responses_expose_battery(monkeypatch: Any) -> None:
+    async def fake_devices(pool: Any) -> list[DeviceSnapshot]:
+        return [make_device(age_minutes=1)]
+
+    async def fake_track_query(
+        pool: Any,
+        imei: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> list[TrackPoint]:
+        return [make_track_point(1, NOW)]
+
+    monkeypatch.setattr(api_module, "get_devices", fake_devices)
+    monkeypatch.setattr(api_module, "get_track_points", fake_track_query)
+    application, _ = build_test_app()
+    with TestClient(application) as client:
+        login(client)
+        device = client.get("/api/devices").json()[0]
+        points = client.get(
+            f"/api/devices/{IMEI}/track"
+            "?start=2026-09-15T00:00&end=2026-09-16T00:00"
+        ).json()
+
+    assert device["battery_mv"] == 3700
+    assert points[0]["battery_mv"] == 3700
+    assert points[0]["time_valid"] is True
+    assert points[0]["record_seq"] == 1788251489
 
 
 def test_database_error_returns_generic_500(monkeypatch: Any) -> None:

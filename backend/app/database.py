@@ -46,10 +46,10 @@ UPSERT_DEVICE_LATEST_SQL = """
 INSERT INTO devices (
     imei, first_seen, last_seen, last_gps_time, last_valid, last_lat, last_lon,
     last_altitude, last_speed, last_course, last_satellites, last_hdop,
-    last_csq, last_wake_code
+    last_csq, last_wake_code, last_battery_mv
 )
 VALUES (
-    $1, NOW(), NOW(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+    $1, NOW(), NOW(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
 )
 ON CONFLICT (imei) DO UPDATE SET
     last_seen = NOW(),
@@ -96,14 +96,18 @@ ON CONFLICT (imei) DO UPDATE SET
     last_wake_code = CASE
         WHEN devices.last_gps_time IS NULL
           OR EXCLUDED.last_gps_time >= devices.last_gps_time
-        THEN EXCLUDED.last_wake_code ELSE devices.last_wake_code END
+        THEN EXCLUDED.last_wake_code ELSE devices.last_wake_code END,
+    last_battery_mv = CASE
+        WHEN devices.last_gps_time IS NULL
+          OR EXCLUDED.last_gps_time >= devices.last_gps_time
+        THEN EXCLUDED.last_battery_mv ELSE devices.last_battery_mv END
 """
 
 GET_DEVICES_SQL = """
 SELECT
     imei, name, first_seen, last_seen, last_gps_time, last_valid, last_lat,
     last_lon, last_altitude, last_speed, last_course, last_satellites,
-    last_hdop, last_csq, last_wake_code
+    last_hdop, last_csq, last_wake_code, last_battery_mv
 FROM devices
 ORDER BY last_seen DESC, imei ASC
 """
@@ -112,7 +116,7 @@ GET_DEVICE_LATEST_SQL = """
 SELECT
     imei, name, first_seen, last_seen, last_gps_time, last_valid, last_lat,
     last_lon, last_altitude, last_speed, last_course, last_satellites,
-    last_hdop, last_csq, last_wake_code
+    last_hdop, last_csq, last_wake_code, last_battery_mv
 FROM devices
 WHERE imei = $1
 """
@@ -124,13 +128,14 @@ WHERE imei = $1
 RETURNING
     imei, name, first_seen, last_seen, last_gps_time, last_valid, last_lat,
     last_lon, last_altitude, last_speed, last_course, last_satellites,
-    last_hdop, last_csq, last_wake_code
+    last_hdop, last_csq, last_wake_code, last_battery_mv
 """
 
 GET_TRACK_POINTS_SQL = """
 SELECT
     id, imei, gps_time, server_time, valid, latitude, longitude, altitude,
-    speed, course, satellites, hdop, csq, wake_code, raw_data
+    speed, course, satellites, hdop, csq, wake_code, raw_data,
+    battery_mv, time_valid, record_seq
 FROM track_points
 WHERE imei = $1 AND gps_time >= $2 AND gps_time < $3
 ORDER BY gps_time ASC, id ASC
@@ -169,6 +174,7 @@ class DeviceSnapshot:
     last_hdop: float | None
     last_csq: int | None
     last_wake_code: int | None
+    last_battery_mv: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +196,9 @@ class TrackPoint:
     csq: int
     wake_code: int
     raw_data: str
+    battery_mv: int | None = None
+    time_valid: bool | None = None
+    record_seq: int | None = None
 
 
 async def init_pool(settings: DatabaseSettings | None = None) -> asyncpg.Pool:
@@ -264,7 +273,8 @@ def report_to_track_point_params(report: TrackerReport) -> tuple[object, ...]:
 def report_to_device_params(report: TrackerReport) -> tuple[object, ...]:
     """Map a report to the positional parameters of the device upsert."""
     history_params = report_to_track_point_params(report)
-    return history_params[:12]
+    # Legacy ASCII V1 reports carry no battery voltage, so it stays NULL.
+    return history_params[:12] + (report.battery_mv,)
 
 
 def record_to_track_point_params(
@@ -318,6 +328,7 @@ def record_to_device_params(
         record.hdop,
         record.csq,
         record.wake_code,
+        record.battery_mv,
     )
 
 

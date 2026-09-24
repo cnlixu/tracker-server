@@ -30,12 +30,15 @@
     satellites: document.querySelector("#satellites"),
     hdop: document.querySelector("#hdop"),
     csq: document.querySelector("#csq"),
+    deviceBattery: document.querySelector("#device-battery"),
     wakeCode: document.querySelector("#wake-code"),
     trackCount: document.querySelector("#track-count"),
     trackStartTime: document.querySelector("#track-start-time"),
     trackEndTime: document.querySelector("#track-end-time"),
     trackStartPosition: document.querySelector("#track-start-position"),
     trackEndPosition: document.querySelector("#track-end-position"),
+    mapPanel: document.querySelector(".map-panel"),
+    mapFullscreen: document.querySelector("#map-fullscreen"),
   };
 
   const beijingTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
@@ -74,6 +77,45 @@
       maxZoom: 19,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     }).addTo(map);
+  }
+
+  function mapFullscreenAvailable() {
+    return typeof document.documentElement.requestFullscreen === "function";
+  }
+
+  function mapIsExpanded() {
+    return document.fullscreenElement === elements.mapPanel
+      || elements.mapPanel.classList.contains("map-panel--expanded");
+  }
+
+  function updateFullscreenButton() {
+    const expanded = mapIsExpanded();
+    elements.mapFullscreen.textContent = expanded ? "退出全屏" : "全屏";
+    elements.mapFullscreen.setAttribute("aria-pressed", String(expanded));
+  }
+
+  function resizeMap() {
+    if (map) map.invalidateSize();
+  }
+
+  // 浏览器不支持全屏 API 时（或被 iframe 策略拦截）退回 CSS 铺满屏幕。
+  function setMapExpandedByClass(expanded) {
+    elements.mapPanel.classList.toggle("map-panel--expanded", expanded);
+    document.body.classList.toggle("map-expanded", expanded);
+    updateFullscreenButton();
+    resizeMap();
+  }
+
+  function toggleMapFullscreen() {
+    if (mapFullscreenAvailable()) {
+      if (document.fullscreenElement === elements.mapPanel) {
+        document.exitFullscreen().catch(() => setMapExpandedByClass(false));
+      } else {
+        elements.mapPanel.requestFullscreen().catch(() => setMapExpandedByClass(true));
+      }
+      return;
+    }
+    setMapExpandedByClass(!elements.mapPanel.classList.contains("map-panel--expanded"));
   }
 
   function beijingMinuteParts(date) {
@@ -138,6 +180,21 @@
     return number === null ? "—" : String(Math.trunc(number));
   }
 
+  function formatMillivolts(value) {
+    const number = finiteNumber(value);
+    if (number === null || number <= 0) return "—";
+    return `${Math.trunc(number)} mV（${(number / 1000).toFixed(2)} V）`;
+  }
+
+  function pointPopupDetails(point) {
+    const parts = [];
+    const battery = formatMillivolts(point?.battery_mv);
+    if (battery !== "—") parts.push(`电量 ${battery}`);
+    if (typeof point?.record_seq === "number") parts.push(`记录 #${point.record_seq}`);
+    if (point?.time_valid === false) parts.push("时间未校准");
+    return parts.length ? `<br>${parts.join(" · ")}` : "";
+  }
+
   function formatPosition(point) {
     const latitude = finiteNumber(point?.latitude);
     const longitude = finiteNumber(point?.longitude);
@@ -194,7 +251,7 @@
       elements.deviceImei, elements.deviceName, elements.lastSeen,
       elements.lastGpsTime, elements.validStatus, elements.coordinates,
       elements.altitude, elements.speed, elements.course, elements.satellites,
-      elements.hdop, elements.csq, elements.wakeCode,
+      elements.hdop, elements.csq, elements.deviceBattery, elements.wakeCode,
     ]) element.textContent = "—";
     setOnlineStatus();
   }
@@ -214,6 +271,7 @@
     elements.satellites.textContent = formatInteger(device.satellites);
     elements.hdop.textContent = formatNumber(device.hdop, 2);
     elements.csq.textContent = formatInteger(device.csq);
+    elements.deviceBattery.textContent = formatMillivolts(device.battery_mv);
     elements.wakeCode.textContent = formatInteger(device.wake_code);
     setOnlineStatus(device.online_status);
   }
@@ -307,12 +365,18 @@
     trackLayer = L.layerGroup().addTo(map);
     const positions = drawable.map((point) => [Number(point.latitude), Number(point.longitude)]);
     if (positions.length === 1) {
-      L.marker(positions[0]).bindPopup(`轨迹点<br>${formatBeijingTime(drawable[0].gps_time)}`).addTo(trackLayer);
+      L.marker(positions[0])
+        .bindPopup(`轨迹点<br>${formatBeijingTime(drawable[0].gps_time)}${pointPopupDetails(drawable[0])}`)
+        .addTo(trackLayer);
       map.setView(positions[0], 16);
     } else {
       const line = L.polyline(positions, { color: TRACK_COLOR, weight: 4, opacity: 0.85 }).addTo(trackLayer);
-      L.marker(positions[0]).bindPopup(`起点<br>${formatBeijingTime(drawable[0].gps_time)}`).addTo(trackLayer);
-      L.marker(positions.at(-1)).bindPopup(`终点<br>${formatBeijingTime(drawable.at(-1).gps_time)}`).addTo(trackLayer);
+      L.marker(positions[0])
+        .bindPopup(`起点<br>${formatBeijingTime(drawable[0].gps_time)}${pointPopupDetails(drawable[0])}`)
+        .addTo(trackLayer);
+      L.marker(positions.at(-1))
+        .bindPopup(`终点<br>${formatBeijingTime(drawable.at(-1).gps_time)}${pointPopupDetails(drawable.at(-1))}`)
+        .addTo(trackLayer);
       map.fitBounds(line.getBounds(), { padding: [32, 32], maxZoom: 17 });
     }
     return { empty: false, drawableCount: positions.length };
@@ -375,11 +439,19 @@
     if (!elements.timeRangeField.contains(event.target)) setTimeRangePopover(false);
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !elements.timeRangePopover.hidden) {
+    if (event.key !== "Escape") return;
+    if (!elements.timeRangePopover.hidden) {
       setTimeRangePopover(false);
       elements.timeRangeTrigger.focus();
+    } else if (elements.mapPanel.classList.contains("map-panel--expanded")) {
+      setMapExpandedByClass(false);
     }
   });
+  document.addEventListener("fullscreenchange", () => {
+    updateFullscreenButton();
+    resizeMap();
+  });
+  elements.mapFullscreen.addEventListener("click", toggleMapFullscreen);
   elements.refreshDevices.addEventListener("click", loadDevices);
   elements.openDeviceManagement.addEventListener("click", () => {
     window.location.href = "/devices.html";

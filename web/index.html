@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tracker 设备监控</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous">
-  <link rel="stylesheet" href="./style.css?v=4">
-  <link rel="stylesheet" href="./admin.css?v=4">
+  <link rel="stylesheet" href="./style.css?v=5">
+  <link rel="stylesheet" href="./admin.css?v=5">
 </head>
 <body>
   <header class="page-header">
@@ -70,6 +70,7 @@
           <div><dt>卫星数</dt><dd id="satellites">—</dd></div>
           <div><dt>HDOP</dt><dd id="hdop">—</dd></div>
           <div><dt>4G CSQ</dt><dd id="csq">—</dd></div>
+          <div><dt>电池电压</dt><dd id="device-battery">—</dd></div>
           <div><dt>wake_code</dt><dd id="wake-code">—</dd></div>
         </dl>
       </section>
@@ -89,7 +90,11 @@
     <section class="panel map-panel" aria-labelledby="map-heading">
       <div class="section-heading">
         <h2 id="map-heading">轨迹地图</h2>
-        <span class="map-note">WGS84 · OpenStreetMap</span>
+        <div class="map-heading-actions">
+          <span class="map-note">WGS84 · OpenStreetMap</span>
+          <button id="map-fullscreen" class="secondary-button compact-button" type="button"
+                  aria-pressed="false">全屏</button>
+        </div>
       </div>
       <div id="map" aria-label="设备历史轨迹地图"></div>
     </section>
@@ -97,6 +102,6 @@
 
   <footer class="page-footer">所有时间均按北京时间（UTC+8）显示</footer>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
-  <script src="./app.js?v=3"></script>
+  <script src="./app.js?v=4"></script>
 </body>
 </html>

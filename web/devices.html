@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>设备管理 · Tracker</title>
-  <link rel="stylesheet" href="./style.css?v=3">
-  <link rel="stylesheet" href="./admin.css?v=3">
+  <link rel="stylesheet" href="./style.css?v=5">
+  <link rel="stylesheet" href="./admin.css?v=5">
 </head>
 <body>
   <header class="page-header">
@@ -22,13 +22,13 @@
       <p id="management-message" class="message" role="status" aria-live="polite">正在加载设备…</p>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>IMEI</th><th>设备别名</th><th>状态</th><th>最后上线（北京时间）</th><th>最后位置（WGS84）</th><th>卫星 / HDOP / CSQ</th><th>操作</th></tr></thead>
+          <thead><tr><th>IMEI</th><th>设备别名</th><th>状态</th><th>最后上线（北京时间）</th><th>最后位置（WGS84）</th><th>卫星 / HDOP / CSQ</th><th>电量</th><th>操作</th></tr></thead>
           <tbody id="device-table-body"></tbody>
         </table>
       </div>
     </section>
   </main>
   <footer class="page-footer">设备别名最多 64 个字符；留空可清除别名</footer>
-  <script src="./devices.js?v=2"></script>
+  <script src="./devices.js?v=3"></script>
 </body>
 </html>

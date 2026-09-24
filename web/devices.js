@@ -80,6 +80,15 @@
     return cell;
   }
 
+  function formatBattery(value) {
+    const millivolts = Number(value);
+    if (value === null || value === undefined
+      || !Number.isFinite(millivolts) || millivolts <= 0) {
+      return "—";
+    }
+    return `${Math.trunc(millivolts)} mV（${(millivolts / 1000).toFixed(2)} V）`;
+  }
+
   function renderDevices(devices) {
     tableBody.replaceChildren();
     total.textContent = `${devices.length} 台`;
@@ -106,6 +115,7 @@
       row.append(textCell(
         `${device.satellites ?? "—"} / ${device.hdop ?? "—"} / ${device.csq ?? "—"}`,
       ));
+      row.append(textCell(formatBattery(device.battery_mv)));
 
       const actionCell = document.createElement("td");
       const saveButton = document.createElement("button");

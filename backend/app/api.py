@@ -234,6 +234,7 @@ def device_to_response(
         hdop=device.last_hdop,
         csq=device.last_csq,
         wake_code=device.last_wake_code,
+        battery_mv=device.last_battery_mv,
     )
 
 
@@ -253,6 +254,9 @@ def track_point_to_response(point: TrackPoint) -> TrackPointResponse:
         hdop=point.hdop,
         csq=point.csq,
         wake_code=point.wake_code,
+        battery_mv=point.battery_mv,
+        time_valid=point.time_valid,
+        record_seq=point.record_seq,
     )
 
 

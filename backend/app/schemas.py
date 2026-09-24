@@ -55,6 +55,7 @@ class DeviceResponse(BaseModel):
     hdop: float | None
     csq: int | None
     wake_code: int | None
+    battery_mv: int | None
 
 
 class TrackPointResponse(BaseModel):
@@ -74,3 +75,6 @@ class TrackPointResponse(BaseModel):
     hdop: float | None
     csq: int
     wake_code: int
+    battery_mv: int | None = None
+    time_valid: bool | None = None
+    record_seq: int | None = None
