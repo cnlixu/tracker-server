@@ -1,94 +1,160 @@
-#!/usr/bin/env bash
+#!/bin/bash
+
 set -euo pipefail
 
-readonly PROJECT_ROOT="/opt/tracker"
-readonly VENV_DIR="${PROJECT_ROOT}/.venv"
-readonly SERVICES=(tracker-tcp tracker-api)
+PROJECT_DIR="/opt/tracker"
+VENV_DIR="$PROJECT_DIR/.venv"
+REQUIREMENTS="$PROJECT_DIR/backend/requirements.txt"
+SCHEMA_FILE="$PROJECT_DIR/backend/sql/schema.sql"
 
-run_privileged() {
-    if [[ ${EUID} -eq 0 ]]; then
-        "$@"
-    else
-        sudo "$@"
-    fi
-}
+TCP_SERVICE="tracker-tcp"
+API_SERVICE="tracker-api"
 
-show_service_diagnostics() {
-    local service
-    echo "Service diagnostics:" >&2
-    for service in "${SERVICES[@]}"; do
-        echo "--- ${service}: status ---" >&2
-        run_privileged systemctl --no-pager --full status "${service}" >&2 || true
-        echo "--- ${service}: recent journal ---" >&2
-        run_privileged journalctl --no-pager -u "${service}" -n 50 >&2 || true
-    done
-}
+DB_HOST="${DB_HOST:-127.0.0.1}"
+DB_PORT="${DB_PORT:-5432}"
+DB_NAME="${DB_NAME:-tracker}"
+DB_USER="${DB_USER:-tracker}"
 
-deployment_error() {
-    local exit_status=$?
-    echo "ERROR: deployment stopped with exit status ${exit_status}" >&2
-    show_service_diagnostics
-    exit "${exit_status}"
-}
-trap deployment_error ERR
+echo "========================================"
+echo " Tracker deployment"
+echo "========================================"
 
-if [[ "$(pwd -P)" != "${PROJECT_ROOT}" ]]; then
-    echo "ERROR: run this script from ${PROJECT_ROOT}" >&2
+cd "$PROJECT_DIR"
+
+echo
+echo "[1/8] Check working tree"
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+    echo "ERROR: Server working tree has local changes."
+    echo "Please inspect before deployment:"
+    git status --short
     exit 1
 fi
 
-if [[ ! -d .git ]]; then
-    echo "ERROR: ${PROJECT_ROOT} is not a Git working tree" >&2
-    exit 1
-fi
+echo "Branch:"
+git branch --show-current
 
-if [[ ! -f .env ]]; then
-    echo "ERROR: ${PROJECT_ROOT}/.env is missing" >&2
-    exit 1
-fi
+echo "Current commit:"
+git rev-parse --short HEAD
 
-if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
-    echo "ERROR: Python venv not found at ${VENV_DIR}" >&2
-    exit 1
-fi
 
-if [[ ${EUID} -ne 0 ]] && ! command -v sudo >/dev/null 2>&1; then
-    echo "ERROR: sudo is required to restart system services" >&2
-    exit 1
-fi
+echo
+echo "[2/8] Pull latest code"
 
-echo "Current Git commit: $(git rev-parse HEAD)"
 git pull --ff-only
-echo "Deploying Git commit: $(git rev-parse HEAD)"
 
-# shellcheck disable=SC1091
-source "${VENV_DIR}/bin/activate"
-python -m pip install -r backend/requirements.txt
+echo "New commit:"
+git rev-parse --short HEAD
 
-# Reserved for a future versioned database migration command.
-# Run migrations here before restarting either application service.
 
-restart_failed=0
-for service in "${SERVICES[@]}"; do
-    echo "Restarting ${service}..."
-    if ! run_privileged systemctl restart "${service}"; then
-        echo "ERROR: failed to restart ${service}" >&2
-        restart_failed=1
-    fi
-done
+echo
+echo "[3/8] Activate Python virtualenv"
 
-for service in "${SERVICES[@]}"; do
-    if run_privileged systemctl is-active --quiet "${service}"; then
-        echo "ACTIVE: ${service}"
-    else
-        echo "ERROR: ${service} is not active" >&2
-        restart_failed=1
-    fi
-done
-
-if [[ ${restart_failed} -ne 0 ]]; then
-    show_service_diagnostics
+if [ ! -f "$VENV_DIR/bin/activate" ]; then
+    echo "ERROR: Python virtualenv not found:"
+    echo "$VENV_DIR"
     exit 1
 fi
 
-echo "Deployment completed successfully."
+source "$VENV_DIR/bin/activate"
+
+
+echo
+echo "[4/8] Update Python dependencies"
+
+python -m pip install -r "$REQUIREMENTS"
+
+
+echo
+echo "[5/8] Apply database schema"
+
+if [ ! -f "$SCHEMA_FILE" ]; then
+    echo "ERROR: Schema file not found:"
+    echo "$SCHEMA_FILE"
+    exit 1
+fi
+
+echo "Database: $DB_NAME"
+echo "User:     $DB_USER"
+
+psql \
+    -h "$DB_HOST" \
+    -p "$DB_PORT" \
+    -U "$DB_USER" \
+    -d "$DB_NAME" \
+    -v ON_ERROR_STOP=1 \
+    -f "$SCHEMA_FILE"
+
+
+echo
+echo "[6/8] Restart services"
+
+sudo systemctl restart "$TCP_SERVICE"
+sudo systemctl restart "$API_SERVICE"
+
+sleep 2
+
+
+echo
+echo "[7/8] Check services"
+
+if ! sudo systemctl is-active --quiet "$TCP_SERVICE"; then
+    echo "ERROR: $TCP_SERVICE failed"
+    sudo systemctl status "$TCP_SERVICE" --no-pager
+    sudo journalctl -u "$TCP_SERVICE" -n 50 --no-pager
+    exit 1
+fi
+
+echo "$TCP_SERVICE: OK"
+
+if ! sudo systemctl is-active --quiet "$API_SERVICE"; then
+    echo "ERROR: $API_SERVICE failed"
+    sudo systemctl status "$API_SERVICE" --no-pager
+    sudo journalctl -u "$API_SERVICE" -n 50 --no-pager
+    exit 1
+fi
+
+echo "$API_SERVICE: OK"
+
+
+echo
+echo "[8/8] Health checks"
+
+echo "Check TCP port 8686..."
+
+if ss -lnt | grep -q ':8686 '; then
+    echo "TCP 8686: OK"
+else
+    echo "ERROR: TCP port 8686 is not listening"
+    sudo journalctl -u "$TCP_SERVICE" -n 50 --no-pager
+    exit 1
+fi
+
+
+echo
+echo "Check API..."
+
+if curl \
+    --fail \
+    --silent \
+    --show-error \
+    --max-time 5 \
+    http://127.0.0.1:8000/api/health >/dev/null; then
+
+    echo "API health: OK"
+
+else
+
+    echo "ERROR: API health check failed"
+
+    sudo journalctl -u "$API_SERVICE" -n 50 --no-pager
+
+    exit 1
+fi
+
+
+echo
+echo "========================================"
+echo " Deployment successful"
+echo " Commit: $(git rev-parse --short HEAD)"
+echo "========================================"
