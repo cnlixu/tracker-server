@@ -42,6 +42,30 @@ ON CONFLICT (imei, generation_id, record_seq) DO NOTHING
 RETURNING id
 """
 
+# One set-based statement keeps a 512-record upload inside the device's ACK
+# latency budget and, together with the surrounding transaction, makes the ACK
+# mean that every accepted row and the latest-device snapshot are durable.
+INSERT_POSITION_RECORDS_SQL = """
+WITH inserted AS (
+    INSERT INTO track_points (
+        imei, gps_time, valid, latitude, longitude, altitude, speed, course,
+        satellites, hdop, csq, wake_code, raw_data,
+        generation_id, record_seq, batch_id, battery_mv, time_valid
+    )
+    SELECT *
+    FROM UNNEST(
+        $1::TEXT[], $2::TIMESTAMPTZ[], $3::BOOLEAN[], $4::DOUBLE PRECISION[],
+        $5::DOUBLE PRECISION[], $6::REAL[], $7::REAL[], $8::REAL[],
+        $9::SMALLINT[], $10::REAL[], $11::SMALLINT[], $12::SMALLINT[],
+        $13::TEXT[], $14::BIGINT[], $15::BIGINT[], $16::BIGINT[],
+        $17::INTEGER[], $18::BOOLEAN[]
+    )
+    ON CONFLICT (imei, generation_id, record_seq) DO NOTHING
+    RETURNING 1
+)
+SELECT COUNT(*) FROM inserted
+"""
+
 UPSERT_DEVICE_LATEST_SQL = """
 INSERT INTO devices (
     imei, first_seen, last_seen, last_gps_time, last_valid, last_lat, last_lon,
@@ -332,6 +356,22 @@ def record_to_device_params(
     )
 
 
+def records_to_bulk_params(
+    imei: str,
+    generation_id: int,
+    batch_id: int,
+    records: tuple[TrackerRecord, ...] | list[TrackerRecord],
+) -> tuple[object, ...]:
+    """Transpose validated records into PostgreSQL arrays for one UNNEST."""
+    rows = [
+        record_to_track_point_params(imei, generation_id, batch_id, record)
+        for record in records
+    ]
+    if not rows:
+        raise DatabaseValueError("records must not be empty")
+    return tuple([row[column] for row in rows] for column in range(len(rows[0])))
+
+
 async def insert_track_point(
     pool: asyncpg.Pool,
     report: TrackerReport,
@@ -379,20 +419,20 @@ async def save_records(
     _validate_imei(imei)
     ordered = sorted(records, key=lambda record: record.sequence)
 
-    inserted = 0
+    bulk_params = records_to_bulk_params(
+        imei,
+        generation_id,
+        batch_id,
+        ordered,
+    )
     async with pool.acquire() as connection:
         async with connection.transaction():
-            for record in ordered:
-                if await _insert_position_record(
-                    connection,
-                    imei,
-                    generation_id,
-                    batch_id,
-                    record,
-                ):
-                    inserted += 1
+            inserted = await connection.fetchval(
+                INSERT_POSITION_RECORDS_SQL,
+                *bulk_params,
+            )
             await _upsert_device_from_record(connection, imei, ordered[-1])
-    return inserted
+    return int(inserted or 0)
 
 
 async def get_devices(pool: asyncpg.Pool) -> list[DeviceSnapshot]:

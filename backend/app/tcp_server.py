@@ -14,7 +14,7 @@ import logging
 from typing import Protocol
 
 from .binary_protocol import (
-    MAX_FRAME_PAYLOAD_SIZE,
+    MAX_UPLOAD_PAYLOAD_SIZE,
     STATUS_BAD_RECORD,
     STATUS_OK,
     STATUS_STORAGE_FAILED,
@@ -40,7 +40,7 @@ from .services import TrackerService
 LOGGER = logging.getLogger(__name__)
 
 MAX_FRAME_SIZE = 2048
-MAX_BINARY_PAYLOAD_SIZE = MAX_FRAME_PAYLOAD_SIZE
+MAX_BINARY_PAYLOAD_SIZE = MAX_UPLOAD_PAYLOAD_SIZE
 READ_CHUNK_SIZE = 4096
 ACK_OK = b"$ACK,OK\r\n"
 ACK_ERROR = b"$ACK,ERROR\r\n"

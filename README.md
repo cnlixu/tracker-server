@@ -1,5 +1,8 @@
 # Tracker Server
 
+第三方服务器开发、数据解析、长连接交互、幂等和ACK要求见
+[`docs/server-development-requirements-zh.md`](docs/server-development-requirements-zh.md)。
+
 Backend and web source for the tracker service.
 
 ## Workflow

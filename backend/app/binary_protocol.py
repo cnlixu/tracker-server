@@ -55,6 +55,8 @@ RECORD_SIZE = 30
 RECORD_BODY_SIZE = 28
 ACK_PAYLOAD_SIZE = 24
 MAX_FRAME_PAYLOAD_SIZE = 65_535
+MAX_BATCH_RECORDS = 512
+MAX_UPLOAD_PAYLOAD_SIZE = PAYLOAD_HEADER_SIZE + MAX_BATCH_RECORDS * RECORD_SIZE
 
 STATUS_OK = 0x00
 STATUS_SERVER_BUSY = 0x01
@@ -297,6 +299,11 @@ def decode_frame(frame: bytes) -> TrackerBatch:
         raise FrameFormatError(
             "a frame must contain at least one record", identity=identity
         )
+    if count > MAX_BATCH_RECORDS:
+        raise RecordError(
+            f"record count {count} exceeds maximum {MAX_BATCH_RECORDS}",
+            identity=identity,
+        )
     record_bytes = payload[PAYLOAD_HEADER_SIZE:]
     if len(record_bytes) != count * RECORD_SIZE:
         raise FrameFormatError(
@@ -396,6 +403,10 @@ def build_position_frame(
     """
     if not records:
         raise BinaryProtocolError("a frame must contain at least one record")
+    if len(records) > MAX_BATCH_RECORDS:
+        raise BinaryProtocolError(
+            f"a frame must not exceed {MAX_BATCH_RECORDS} records"
+        )
     if device_id is None:
         if imei is None:
             raise BinaryProtocolError("imei or device_id is required")

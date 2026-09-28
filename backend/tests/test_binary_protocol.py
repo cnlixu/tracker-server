@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 import pytest
 
 from backend.app.binary_protocol import (
+    MAX_BATCH_RECORDS,
     MAX_FRAME_PAYLOAD_SIZE,
+    MAX_UPLOAD_PAYLOAD_SIZE,
     RETRYABLE_STATUSES,
     STATUS_BAD_RECORD,
     STATUS_OK,
@@ -164,6 +166,28 @@ def test_multi_record_frame_decodes_every_record() -> None:
     batch = decode_frame(frame)
     assert batch.record_count == 2
     assert batch.records[0] == batch.records[1]
+
+
+def test_maximum_512_record_batch_round_trips() -> None:
+    frame = build_position_frame(
+        imei=IMEI,
+        generation_id=GENERATION_ID,
+        batch_id=BATCH_ID,
+        records=[sample_record()] * MAX_BATCH_RECORDS,
+    )
+
+    assert len(frame) == MAX_UPLOAD_PAYLOAD_SIZE + 8 == 15_387
+    assert decode_frame(frame).record_count == MAX_BATCH_RECORDS
+
+
+def test_frame_builder_rejects_more_than_512_records() -> None:
+    with pytest.raises(BinaryProtocolError, match="must not exceed 512"):
+        build_position_frame(
+            imei=IMEI,
+            generation_id=GENERATION_ID,
+            batch_id=BATCH_ID,
+            records=[sample_record()] * (MAX_BATCH_RECORDS + 1),
+        )
 
 
 def test_frame_crc_mismatch_is_rejected() -> None:

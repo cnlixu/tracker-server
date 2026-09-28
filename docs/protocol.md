@@ -116,6 +116,8 @@ implementation. All multi-byte integers inside the payload are little endian.
 | 2 | record count |
 | 30 × count | position records |
 
+`count`的有效范围为1～512，因此最大`LENGTH`为15379字节，最大完整帧为15387字节。一个TCP连接可以连续携带多个批次；服务端必须按`LENGTH`循环拆帧并逐批回复ACK，不能依赖连接关闭确定帧边界。
+
 Each position record is 30 bytes:
 
 | Offset | Size | Field |
@@ -167,6 +169,14 @@ delivered, so the device's retry timeout is the safer outcome.
 
 Record identity `(imei, generation_id, record_seq)` is unique in the database,
 so a batch re-sent after a lost acknowledgement is stored idempotently.
+
+For a duplicated or partially overlapping batch, the success ACK still echoes
+the upload's original `count`, not the number of newly inserted rows. The test
+server persists up to 512 records with one set-based PostgreSQL statement so
+the transaction can complete inside the device's ACK latency budget.
+
+The complete third-party implementation and acceptance requirements are in
+[`server-development-requirements-zh.md`](server-development-requirements-zh.md).
 
 The binary reference frame and its expected acknowledgement are reproduced in
 `backend/tests/test_binary_protocol.py` and

@@ -15,6 +15,7 @@ from backend.app.database import (
     GET_DEVICE_LATEST_SQL,
     GET_DEVICES_SQL,
     GET_TRACK_POINTS_SQL,
+    INSERT_POSITION_RECORDS_SQL,
     INSERT_POSITION_RECORD_SQL,
     INSERT_TRACK_POINT_SQL,
     SCHEMA_PATH,
@@ -31,6 +32,7 @@ from backend.app.database import (
     init_schema,
     record_to_device_params,
     record_to_track_point_params,
+    records_to_bulk_params,
     report_to_device_params,
     report_to_track_point_params,
     save_records,
@@ -421,7 +423,7 @@ def test_position_record_parameter_mapping() -> None:
 
 def test_save_records_uses_one_transaction_in_sequence_order() -> None:
     connection = FakeConnection()
-    connection.fetchval_result = 1
+    connection.fetchval_result = 2
     pool = FakePool(connection)
     record = firmware_record()
     newer = replace(record, sequence=record.sequence + 1)
@@ -439,16 +441,10 @@ def test_save_records_uses_one_transaction_in_sequence_order() -> None:
     assert inserted == 2
     assert connection.transaction_entered == 1
     assert connection.transaction_exit_types == [None]
-    assert connection.calls == ["fetchval", "fetchval", "execute"]
-    assert [sql for sql, _ in connection.fetchval_calls] == [
-        INSERT_POSITION_RECORD_SQL,
-        INSERT_POSITION_RECORD_SQL,
-    ]
-    assert connection.fetchval_calls[0][1] == record_to_track_point_params(
-        IMEI, GENERATION_ID, BATCH_ID, record
-    )
-    assert connection.fetchval_calls[1][1] == record_to_track_point_params(
-        IMEI, GENERATION_ID, BATCH_ID, newer
+    assert connection.calls == ["fetchval", "execute"]
+    assert connection.fetchval_calls[0][0] == INSERT_POSITION_RECORDS_SQL
+    assert connection.fetchval_calls[0][1] == records_to_bulk_params(
+        IMEI, GENERATION_ID, BATCH_ID, [record, newer]
     )
     assert connection.execute_calls[0][0] == UPSERT_DEVICE_LATEST_SQL
     assert connection.execute_calls[0][1] == record_to_device_params(IMEI, newer)
@@ -456,8 +452,8 @@ def test_save_records_uses_one_transaction_in_sequence_order() -> None:
 
 def test_save_records_treats_conflicts_as_already_stored() -> None:
     connection = FakeConnection()
-    # ON CONFLICT DO NOTHING returns no row for a re-delivered record.
-    connection.fetchval_result = None
+    # The aggregate returns zero when ON CONFLICT ignores a re-delivered record.
+    connection.fetchval_result = 0
     pool = FakePool(connection)
 
     inserted = asyncio.run(
@@ -545,15 +541,15 @@ def test_service_routes_v3_reports_to_the_record_path() -> None:
 
     assert result == 1
     assert connection.calls == ["fetchval", "execute"]
-    assert connection.fetchval_calls[0][0] == INSERT_POSITION_RECORD_SQL
+    assert connection.fetchval_calls[0][0] == INSERT_POSITION_RECORDS_SQL
 
     params = connection.fetchval_calls[0][1]
-    assert params[0] == report.imei
-    assert params[13] == report.generation_id
-    assert params[14] == report.record_sequence
-    assert params[15] == report.batch_id
-    assert params[16] == report.battery_mv
-    assert params[17] is True
+    assert params[0] == [report.imei]
+    assert params[13] == [report.generation_id]
+    assert params[14] == [report.record_sequence]
+    assert params[15] == [report.batch_id]
+    assert params[16] == [report.battery_mv]
+    assert params[17] == [True]
 
 
 def test_service_persists_a_decoded_binary_batch() -> None:
@@ -566,14 +562,14 @@ def test_service_persists_a_decoded_binary_batch() -> None:
 
     assert inserted == 1
     assert connection.calls == ["fetchval", "execute"]
-    assert connection.fetchval_calls[0][0] == INSERT_POSITION_RECORD_SQL
+    assert connection.fetchval_calls[0][0] == INSERT_POSITION_RECORDS_SQL
 
     params = connection.fetchval_calls[0][1]
-    assert params[0] == batch.imei
-    assert params[13] == batch.generation_id
-    assert params[14] == batch.records[0].sequence
-    assert params[15] == batch.batch_id
-    assert params[16] == 3700
+    assert params[0] == [batch.imei]
+    assert params[13] == [batch.generation_id]
+    assert params[14] == [batch.records[0].sequence]
+    assert params[15] == [batch.batch_id]
+    assert params[16] == [3700]
 
 
 def _placeholder_count(sql: str) -> int:
@@ -596,4 +592,7 @@ def test_sql_placeholder_counts_match_mapping_functions() -> None:
     )
     assert _placeholder_count(INSERT_POSITION_RECORD_SQL) == len(
         record_to_track_point_params(IMEI, GENERATION_ID, BATCH_ID, record)
+    )
+    assert _placeholder_count(INSERT_POSITION_RECORDS_SQL) == len(
+        records_to_bulk_params(IMEI, GENERATION_ID, BATCH_ID, [record])
     )

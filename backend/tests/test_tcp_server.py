@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from backend.app.binary_protocol import (
+    MAX_BATCH_RECORDS,
     STATUS_BAD_RECORD,
     STATUS_OK,
     STATUS_STORAGE_FAILED,
@@ -343,6 +344,41 @@ def test_binary_multi_record_batch_reports_its_count() -> None:
     assert parse_binary_ack(bytes(writer.output))["count"] == 2
 
 
+def test_binary_512_record_batch_is_accepted() -> None:
+    service = FakeService()
+    frame = build_position_frame(
+        imei=IMEI,
+        generation_id=GENERATION_ID,
+        batch_id=BATCH_ID,
+        records=[sample_record()] * MAX_BATCH_RECORDS,
+    )
+    writer = asyncio.run(run_client([frame[:4096], frame[4096:]], service))
+
+    assert len(frame) == 15_387
+    assert service.batches[0].record_count == MAX_BATCH_RECORDS
+    assert parse_binary_ack(bytes(writer.output))["count"] == MAX_BATCH_RECORDS
+
+
+def test_two_binary_batches_share_one_connection_and_each_receive_ack() -> None:
+    service = FakeService()
+    first = upload_frame()
+    second = build_position_frame(
+        imei=IMEI,
+        generation_id=GENERATION_ID,
+        batch_id=BATCH_ID + 1,
+        records=[sample_record(), sample_record()],
+    )
+    writer = asyncio.run(run_client([first + second], service))
+
+    assert [batch.batch_id for batch in service.batches] == [BATCH_ID, BATCH_ID + 1]
+    assert len(writer.output) == 64
+    assert parse_binary_ack(bytes(writer.output[:32]))["count"] == 1
+    second_ack = parse_binary_ack(bytes(writer.output[32:]))
+    assert second_ack["count"] == 2
+    assert second_ack["batch_id"] == BATCH_ID + 1
+    assert writer.drain_count == 2
+
+
 def test_binary_frame_with_bad_crc_is_not_acknowledged() -> None:
     service = FakeService()
     frame = bytearray(upload_frame())
@@ -418,4 +454,3 @@ def test_v3_ascii_report_is_passed_to_the_service() -> None:
     assert service.reports[0].record_sequence == BATCH_ID
     assert service.reports[0].battery_mv == 3700
     assert bytes(writer.output) == ACK_OK
-
