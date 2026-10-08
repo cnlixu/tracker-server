@@ -101,7 +101,7 @@ def make_track_point(point_id: int, gps_time: datetime) -> TrackPoint:
         hdop=2.21,
         csq=31,
         wake_code=1,
-        raw_data="$PTRK,...*00",
+        raw_data="7E0200...7E",
         battery_mv=3700,
         time_valid=True,
         record_seq=1788251489,

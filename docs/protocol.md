@@ -1,183 +1,119 @@
-# Tracker protocols
+# 电力定位跟踪器 JT/T 808-2019 接入规范
 
-The server accepts the two protocols emitted by the tracker firmware and keeps
-the legacy ASCII V1 parser for older devices:
+本项目只接受 JT/T 808-2019 二进制协议，不再兼容 `$PTRK` ASCII 或原自定义 HEX 协议。传输层固定使用 TCP。
 
-| Transport | First byte | Framing | Acknowledgement |
-| --- | --- | --- | --- |
-| Binary V2 (primary) | `0xA5` | `A5 5A` + class + id + length | 32-byte binary acknowledgement |
-| ASCII V3 / V1 | `$` | CR/LF terminated NMEA-style line | `$ACK,OK` or `$ACK,ERROR` |
+## 1. 裁剪后的消息集合
 
-A connection carries exactly one flavour, selected by its first byte.
+| 方向 | 消息 ID | 用途 |
+| --- | ---: | --- |
+| 终端→平台 | `0x0100` | 首次注册，获取鉴权码 |
+| 平台→终端 | `0x8100` | 注册应答 |
+| 终端→平台 | `0x0102` | 每次 TCP 连接建立后的鉴权 |
+| 终端→平台 | `0x0200` | 单条实时位置上报 |
+| 终端→平台 | `0x0704` | 离线位置批量补传 |
+| 平台→终端 | `0x8001` | 鉴权、位置和批量位置的通用应答 |
 
-## ASCII protocol
+心跳、参数下发、区域路线、电话、文本、多媒体、驾驶员卡、CAN 等消息不属于本产品。设备每轮上传后主动休眠，TCP 连接不是常驻连接，因此不发送 `0x0002` 心跳。
 
-`PTRK` is an NMEA-style device report. The protocol module parses one complete
-logical report at a time; TCP stream framing is outside its scope.
+## 2. 标准帧
 
-### Wire format
+- 起止标识：`0x7E`。
+- 2019 版协议版本号：`0x01`，消息体属性 bit14 必须为 1。
+- 终端手机号：10 字节 BCD。当前产品没有 MSISDN 配置时使用 15 位 IMEI 左补零。
+- 多字节整数：大端序。
+- 校验：消息头到消息体末字节逐字节 XOR。
+- 转义顺序：`0x7D → 0x7D 0x01`，`0x7E → 0x7D 0x02`。
+- 单个物理帧消息体最多 1023 字节；超出后使用 JT/T 808 标准分包头。
 
-```text
-$PTRK,1,862288087606784,150926,094508,A,3045.83496,N,10354.09348,E,575.0,0.111,193.85,9,2.21,31,1*69
-```
+TCP 是字节流，服务端必须按 `0x7E` 持续拆帧，支持半包、粘包、连续多帧和转义字符，不能把一次 `read()` 当成一帧。
 
-The V1 body has 17 comma-separated fields:
+## 3. 注册和鉴权
 
-| Index | Name | Meaning |
-| ---: | --- | --- |
-| 0 | message type | `PTRK` |
-| 1 | protocol version | `1` |
-| 2 | IMEI | 15 ASCII decimal digits |
-| 3 | UTC date | `ddmmyy`; years are interpreted as 2000-2099 |
-| 4 | UTC time | `hhmmss` |
-| 5 | valid | `A` for valid GNSS fix, `V` for invalid |
-| 6 | latitude | NMEA `ddmm.mmmmm` |
-| 7 | latitude hemisphere | `N` or `S` |
-| 8 | longitude | NMEA `dddmm.mmmmm` |
-| 9 | longitude hemisphere | `E` or `W` |
-| 10 | altitude | metres |
-| 11 | speed | knots |
-| 12 | course | degrees |
-| 13 | satellites | non-negative integer |
-| 14 | HDOP | floating-point value |
-| 15 | CSQ | non-negative integer |
-| 16 | wake code | `0` power-on, `1` timer, `5` power key |
+设备无本地鉴权码时发送 `0x0100`。测试服务器使用环境变量 `JT808_AUTH_CODE` 配置注册应答中的鉴权码；设备将成功取得的鉴权码保存到 FSKV。
 
-For status `V`, fields 6 through 14 may be empty. If a coordinate is present,
-its hemisphere must also be present and valid. Status `A` requires every GNSS
-field.
+每次 TCP 连接建立后，设备必须先发送 `0x0102`。平台返回成功 `0x8001` 后才允许位置上报。当前测试服务器校验鉴权码、消息头终端号和鉴权体 IMEI 一致性。
 
-### V3 layout
+量产平台应为每台设备分配独立鉴权凭据，不能让所有设备长期共用测试鉴权码。
 
-The current firmware appends the same per-record identity the binary protocol
-uses, giving a 22-field body:
+## 4. 位置信息
 
-```text
-$PTRK,3,862288087606784,305419896,1788251489,1788251489,010926,083129,A,1,3045.81768,N,10354.07883,E,516.2,0.591,152.99,15,0.80,31,3700,1*76
-```
+`0x0200` 的前 28 字节完全使用 JT/T 808-2019 标准位置基本信息：报警标志、状态、纬度、经度、高程、速度、方向和 GMT+8 BCD 时间。
 
-| Index | Name | Meaning |
-| ---: | --- | --- |
-| 0-2 | message type, version, IMEI | as V1, with version `3` |
-| 3 | generation ID | data generation the record belongs to |
-| 4 | record sequence | strictly increasing per generation |
-| 5 | batch ID | sequence of the last record in the upload batch |
-| 6-7 | UTC date and time | `ddmmyy`, `hhmmss` |
-| 8 | valid | `A` / `V` |
-| 9 | time valid | `1` when the UTC timestamp is trustworthy, else `0` |
-| 10-18 | GNSS block | identical layout to V1 fields 6-14 |
-| 19 | CSQ | non-negative integer |
-| 20 | battery | millivolts; `0` when unreadable |
-| 21 | wake code | as V1 |
+标准附加项：
 
-V3 reports are stored through the same idempotent record path as binary V2, so
-re-deliveries cannot duplicate rows.
-
-### Checksum
-
-Starting with zero, XOR every ASCII byte between `$` and `*`. Neither delimiter
-is included. The wire value is exactly two hexadecimal characters; parsing is
-case-insensitive and generation uses uppercase.
-
-The V1 example body produces `0x69`, the V3 example body `0x76`.
-
-## Parsed representation
-
-- Time is a timezone-aware UTC `datetime`.
-- Coordinates are signed WGS84 decimal degrees.
-- `S` and `W` coordinates are negative.
-- GNSS measurements are `None` when omitted in a `V` report.
-- `raw_data` retains the validated logical report, excluding an optional CR/LF
-  transport terminator.
-- `generation_id`, `record_sequence`, `batch_id`, `time_valid` and `battery_mv`
-  are only set for V3 reports.
-
-## Binary protocol (V2)
-
-Binary V2 is the primary tracker transport. Frames are not line terminated, so
-the server frames them by length.
-
-```text
-A5 5A | CLASS (0x01) | ID (0x01 position) | LENGTH (uint16, payload size in bytes) | PAYLOAD | CRC16 (uint16)
-```
-
-`CRC16` covers CLASS, ID, LENGTH and PAYLOAD and is CRC-16/CCITT-FALSE (poly
-`0x1021`, init `0xFFFF`, no reflection), identical to the firmware
-implementation. All multi-byte integers inside the payload are little endian.
-
-### Upload payload
-
-| Size | Field |
-| ---: | --- |
-| 1 | payload version, `2` |
-| 8 | device id, 15-digit IMEI plus `F` padding in BCD nibbles |
-| 4 | generation id |
-| 4 | batch id (sequence of the last record in the batch) |
-| 2 | record count |
-| 30 × count | position records |
-
-`count`的有效范围为1～512，因此最大`LENGTH`为15379字节，最大完整帧为15387字节。一个TCP连接可以连续携带多个批次；服务端必须按`LENGTH`循环拆帧并逐批回复ACK，不能依赖连接关闭确定帧边界。
-
-Each position record is 30 bytes:
-
-| Offset | Size | Field |
+| ID | 长度 | 内容 |
 | ---: | ---: | --- |
-| 0 | 4 | record sequence |
-| 4 | 4 | UTC timestamp, Unix seconds |
-| 8 | 4 | latitude × 1e7 |
-| 12 | 4 | longitude × 1e7 |
-| 16 | 2 | altitude in metres, `-32768` when unknown |
-| 18 | 2 | ground speed in cm/s |
-| 20 | 2 | course × 100 |
-| 22 | 2 | battery in mV, `0` when unknown |
-| 24 | 1 | HDOP × 10, `255` when unknown |
-| 25 | 1 | satellites used |
-| 26 | 1 | CSQ |
-| 27 | 1 | flags: bit0 fix valid, bit1 time valid, bits 3-5 wake code |
-| 28 | 2 | CRC16 over bytes 0-27 |
+| `0x30` | 1 | 蜂窝网络信号强度，当前为 CSQ 0～31 |
+| `0x31` | 1 | 参与定位的卫星数 |
 
-The server converts speed to knots so binary and ASCII rows share one unit, and
-stores `0`/`255`/`-32768` sentinels as `NULL`. `time_valid` records whether the
-device trusted its clock, which matters for rows captured before a GNSS or SNTP
-time fix.
+本产品自定义附加项位于标准允许的 `0xE0～0xFF` 范围：
 
-### Acknowledgement
+### 0xE0：可靠记录身份
 
-```text
-A5 5A | 0x01 | 0x81 (position ACK) | 18 00 (payload length 24) | PAYLOAD (24 bytes) | CRC16
-```
+长度固定 10 字节：
 
-| Size | Field |
-| ---: | --- |
-| 1 | payload version, `2` |
-| 8 | device id, echoed from the upload |
-| 4 | generation id, echoed |
-| 4 | batch id, echoed |
-| 2 | acknowledged record count |
-| 1 | status |
-| 4 | server time, Unix seconds |
+| 偏移 | 长度 | 字段 | 说明 |
+| ---: | ---: | --- | --- |
+| 0 | 1 | version | 当前为 `1` |
+| 1 | 4 | generation_id | 设备数据代次，uint32 |
+| 5 | 4 | record_seq | 代次内单调记录序号，uint32 |
+| 9 | 1 | flags | bit0 时间可信；bit1～3 唤醒原因 |
 
-Status codes: `0x00` accepted, `0x01` server busy, `0x02` unsupported version,
-`0x03` bad record, `0x04` authentication failed, `0x05` persistence failed.
-`0x01` and `0x05` are retryable.
+数据库唯一键必须是 `(terminal_id, generation_id, record_seq)`。JT/T 808 的 16 位消息流水号只用于请求/应答关联，会循环，不能作为全局去重键。
 
-The tracker deletes cached records only after receiving `0x00` with a record
-count equal to the uploaded count, so the server writes and commits the whole
-batch first. Malformed frames (bad sync, length or CRC) are never acknowledged:
-an unreliable acknowledgement could make the device discard records it never
-delivered, so the device's retry timeout is the safer outcome.
+### 0xE1：电池信息
 
-Record identity `(imei, generation_id, record_seq)` is unique in the database,
-so a batch re-sent after a lost acknowledgement is stored idempotently.
+长度固定 3 字节：
 
-For a duplicated or partially overlapping batch, the success ACK still echoes
-the upload's original `count`, not the number of newly inserted rows. The test
-server persists up to 512 records with one set-based PostgreSQL statement so
-the transaction can complete inside the device's ACK latency budget.
+| 偏移 | 长度 | 字段 | 说明 |
+| ---: | ---: | --- | --- |
+| 0 | 2 | battery_mv | VBAT 毫伏值；`0` 表示未知 |
+| 2 | 1 | battery_percent | 0～100；`0xFF` 表示未知 |
 
-The complete third-party implementation and acceptance requirements are in
-[`server-development-requirements-zh.md`](server-development-requirements-zh.md).
+电量百分比由终端根据可配置锂电池曲线估算。终端先对多次 ADC 采样取中值，再进行低通和迟滞处理；平台应同时保存毫伏值与百分比，不应使用百分比反推原始电压。
 
-The binary reference frame and its expected acknowledgement are reproduced in
-`backend/tests/test_binary_protocol.py` and
-`backend/tests/test_tcp_server.py`.
+### 0xE2：HDOP
+
+长度固定 1 字节，单位为 0.1；`0xFF` 表示未知。
+
+## 5. 批量补传
+
+离线记录使用标准 `0x0704`：
+
+1. 数据项个数 `WORD`，范围 1～512。
+2. 位置数据类型 `BYTE`，离线缓存使用 `1`（盲区补报）。
+3. 每条记录为 `位置汇报数据体长度 WORD + 0x0200 消息体`。
+
+512 条记录会形成一个逻辑 `0x0704` 消息，再按 1023 字节上限拆成多个标准子包。服务端必须按终端号、消息 ID、消息流水号、总包数和包序号重组，完整校验并解析整批后再入库。
+
+当前 TCP 模式不启用 `0x8003` 补包请求：任何子包缺失都会导致本次请求没有成功应答，设备超时后原样重发整批。
+
+## 6. ACK 与可靠性
+
+平台仅在以下动作全部完成后返回成功 `0x8001`：
+
+1. 完整接收并重组逻辑消息。
+2. 校验所有物理帧和位置记录。
+3. 使用记录唯一键幂等写入全部轨迹点。
+4. 更新设备最新状态。
+5. 提交数据库事务。
+
+`0x8001` 必须回显终端消息流水号和消息 ID。结果码采用标准定义：`0` 成功、`1` 失败、`2` 消息有误、`3` 不支持、`4` 报警处理确认。
+
+设备只有收到与当前请求流水号和消息 ID 完全匹配的成功应答，才从 Flash 循环队列删除对应记录。ACK 丢失时设备会重传；平台遇到重复记录仍应幂等提交并返回成功。
+
+校验失败或无法信任消息头时不返回 ACK，让终端超时重传。数据库失败返回结果 `1`，消息体错误返回结果 `2`。
+
+## 7. 数据单位
+
+- 坐标：WGS-84，线上单位 `10^-6` 度。
+- 高程：米。
+- 速度：线上单位 `0.1 km/h`；当前数据库兼容字段仍存储节。
+- 方向：0～359 度。
+- 时间：JT/T 808 线上为 GMT+8，服务器解析后统一存 UTC。
+- VBAT：mV。
+- HDOP：0.1。
+
+## 8. 安全边界
+
+JT/T 808 的 XOR 只能检错，不能提供加密、服务器身份认证或防伪造。正式部署应在 JT/T 808 之外启用 TLS，并使用每设备独立鉴权码；敏感定位数据在数据库和备份中也应加密并实施访问审计。

@@ -1,9 +1,4 @@
-"""Async PostgreSQL persistence for tracker reports.
-
-Legacy ASCII V1 reports are stored through :func:`save_report`. Binary V2
-frames and ASCII V3 reports are stored through :func:`save_records`, which adds
-the per-record identity columns used for idempotent re-delivery.
-"""
+"""Async PostgreSQL persistence for JT/T 808 tracker locations."""
 
 from __future__ import annotations
 
@@ -14,29 +9,20 @@ from pathlib import Path
 import asyncpg
 
 from .config import DatabaseSettings, load_database_settings
-from .models import TrackerRecord, TrackerReport
+from .models import TrackerRecord
 
 
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "sql" / "schema.sql"
-
-INSERT_TRACK_POINT_SQL = """
-INSERT INTO track_points (
-    imei, gps_time, valid, latitude, longitude, altitude, speed, course,
-    satellites, hdop, csq, wake_code, raw_data
-)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-RETURNING id
-"""
 
 INSERT_POSITION_RECORD_SQL = """
 INSERT INTO track_points (
     imei, gps_time, valid, latitude, longitude, altitude, speed, course,
     satellites, hdop, csq, wake_code, raw_data,
-    generation_id, record_seq, batch_id, battery_mv, time_valid
+    generation_id, record_seq, batch_id, battery_mv, battery_percent, time_valid
 )
 VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-    $17, $18
+    $17, $18, $19
 )
 ON CONFLICT (imei, generation_id, record_seq) DO NOTHING
 RETURNING id
@@ -50,7 +36,7 @@ WITH inserted AS (
     INSERT INTO track_points (
         imei, gps_time, valid, latitude, longitude, altitude, speed, course,
         satellites, hdop, csq, wake_code, raw_data,
-        generation_id, record_seq, batch_id, battery_mv, time_valid
+        generation_id, record_seq, batch_id, battery_mv, battery_percent, time_valid
     )
     SELECT *
     FROM UNNEST(
@@ -58,7 +44,7 @@ WITH inserted AS (
         $5::DOUBLE PRECISION[], $6::REAL[], $7::REAL[], $8::REAL[],
         $9::SMALLINT[], $10::REAL[], $11::SMALLINT[], $12::SMALLINT[],
         $13::TEXT[], $14::BIGINT[], $15::BIGINT[], $16::BIGINT[],
-        $17::INTEGER[], $18::BOOLEAN[]
+        $17::INTEGER[], $18::SMALLINT[], $19::BOOLEAN[]
     )
     ON CONFLICT (imei, generation_id, record_seq) DO NOTHING
     RETURNING 1
@@ -70,10 +56,10 @@ UPSERT_DEVICE_LATEST_SQL = """
 INSERT INTO devices (
     imei, first_seen, last_seen, last_gps_time, last_valid, last_lat, last_lon,
     last_altitude, last_speed, last_course, last_satellites, last_hdop,
-    last_csq, last_wake_code, last_battery_mv
+    last_csq, last_wake_code, last_battery_mv, last_battery_percent
 )
 VALUES (
-    $1, NOW(), NOW(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+    $1, NOW(), NOW(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 )
 ON CONFLICT (imei) DO UPDATE SET
     last_seen = NOW(),
@@ -124,14 +110,18 @@ ON CONFLICT (imei) DO UPDATE SET
     last_battery_mv = CASE
         WHEN devices.last_gps_time IS NULL
           OR EXCLUDED.last_gps_time >= devices.last_gps_time
-        THEN EXCLUDED.last_battery_mv ELSE devices.last_battery_mv END
+        THEN EXCLUDED.last_battery_mv ELSE devices.last_battery_mv END,
+    last_battery_percent = CASE
+        WHEN devices.last_gps_time IS NULL
+          OR EXCLUDED.last_gps_time >= devices.last_gps_time
+        THEN EXCLUDED.last_battery_percent ELSE devices.last_battery_percent END
 """
 
 GET_DEVICES_SQL = """
 SELECT
     imei, name, first_seen, last_seen, last_gps_time, last_valid, last_lat,
     last_lon, last_altitude, last_speed, last_course, last_satellites,
-    last_hdop, last_csq, last_wake_code, last_battery_mv
+    last_hdop, last_csq, last_wake_code, last_battery_mv, last_battery_percent
 FROM devices
 ORDER BY last_seen DESC, imei ASC
 """
@@ -140,7 +130,7 @@ GET_DEVICE_LATEST_SQL = """
 SELECT
     imei, name, first_seen, last_seen, last_gps_time, last_valid, last_lat,
     last_lon, last_altitude, last_speed, last_course, last_satellites,
-    last_hdop, last_csq, last_wake_code, last_battery_mv
+    last_hdop, last_csq, last_wake_code, last_battery_mv, last_battery_percent
 FROM devices
 WHERE imei = $1
 """
@@ -152,14 +142,14 @@ WHERE imei = $1
 RETURNING
     imei, name, first_seen, last_seen, last_gps_time, last_valid, last_lat,
     last_lon, last_altitude, last_speed, last_course, last_satellites,
-    last_hdop, last_csq, last_wake_code, last_battery_mv
+    last_hdop, last_csq, last_wake_code, last_battery_mv, last_battery_percent
 """
 
 GET_TRACK_POINTS_SQL = """
 SELECT
     id, imei, gps_time, server_time, valid, latitude, longitude, altitude,
     speed, course, satellites, hdop, csq, wake_code, raw_data,
-    battery_mv, time_valid, record_seq
+    battery_mv, battery_percent, time_valid, record_seq
 FROM track_points
 WHERE imei = $1 AND gps_time >= $2 AND gps_time < $3
 ORDER BY gps_time ASC, id ASC
@@ -199,6 +189,7 @@ class DeviceSnapshot:
     last_csq: int | None
     last_wake_code: int | None
     last_battery_mv: int | None = None
+    last_battery_percent: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +212,7 @@ class TrackPoint:
     wake_code: int
     raw_data: str
     battery_mv: int | None = None
+    battery_percent: int | None = None
     time_valid: bool | None = None
     record_seq: int | None = None
 
@@ -274,33 +266,6 @@ async def init_schema(pool: asyncpg.Pool) -> None:
 initialize_schema = init_schema
 
 
-def report_to_track_point_params(report: TrackerReport) -> tuple[object, ...]:
-    """Map a report to the positional parameters of the history insert."""
-    _validate_report_identity(report)
-    return (
-        report.imei,
-        _as_utc(report.gps_time),
-        report.valid,
-        report.latitude,
-        report.longitude,
-        report.altitude,
-        report.speed,
-        report.course,
-        report.satellites,
-        report.hdop,
-        report.csq,
-        report.wake_code,
-        report.raw_data,
-    )
-
-
-def report_to_device_params(report: TrackerReport) -> tuple[object, ...]:
-    """Map a report to the positional parameters of the device upsert."""
-    history_params = report_to_track_point_params(report)
-    # Legacy ASCII V1 reports carry no battery voltage, so it stays NULL.
-    return history_params[:12] + (report.battery_mv,)
-
-
 def record_to_track_point_params(
     imei: str,
     generation_id: int,
@@ -329,6 +294,7 @@ def record_to_track_point_params(
         record.sequence,
         batch_id,
         record.battery_mv,
+        record.battery_percent,
         record.time_valid,
     )
 
@@ -353,6 +319,7 @@ def record_to_device_params(
         record.csq,
         record.wake_code,
         record.battery_mv,
+        record.battery_percent,
     )
 
 
@@ -370,33 +337,6 @@ def records_to_bulk_params(
     if not rows:
         raise DatabaseValueError("records must not be empty")
     return tuple([row[column] for row in rows] for column in range(len(rows[0])))
-
-
-async def insert_track_point(
-    pool: asyncpg.Pool,
-    report: TrackerReport,
-) -> int:
-    """Insert one history row outside the combined report transaction."""
-    async with pool.acquire() as connection:
-        return await _insert_track_point(connection, report)
-
-
-async def upsert_device_latest(
-    pool: asyncpg.Pool,
-    report: TrackerReport,
-) -> None:
-    """Insert or update one device snapshot outside the combined transaction."""
-    async with pool.acquire() as connection:
-        await _upsert_device_latest(connection, report)
-
-
-async def save_report(pool: asyncpg.Pool, report: TrackerReport) -> int:
-    """Atomically store history and update the corresponding device snapshot."""
-    async with pool.acquire() as connection:
-        async with connection.transaction():
-            track_point_id = await _insert_track_point(connection, report)
-            await _upsert_device_latest(connection, report)
-    return track_point_id
 
 
 async def save_records(
@@ -417,6 +357,8 @@ async def save_records(
     if not records:
         raise DatabaseValueError("records must not be empty")
     _validate_imei(imei)
+    if any(record.generation_id not in (None, generation_id) for record in records):
+        raise DatabaseValueError("record generation does not match batch generation")
     ordered = sorted(records, key=lambda record: record.sequence)
 
     bulk_params = records_to_bulk_params(
@@ -507,29 +449,6 @@ async def get_track_points(
 query_track_points = get_track_points
 
 
-async def _insert_track_point(
-    connection: asyncpg.Connection,
-    report: TrackerReport,
-) -> int:
-    track_point_id = await connection.fetchval(
-        INSERT_TRACK_POINT_SQL,
-        *report_to_track_point_params(report),
-    )
-    if track_point_id is None:
-        raise DatabaseError("track point insert did not return an ID")
-    return int(track_point_id)
-
-
-async def _upsert_device_latest(
-    connection: asyncpg.Connection,
-    report: TrackerReport,
-) -> None:
-    await connection.execute(
-        UPSERT_DEVICE_LATEST_SQL,
-        *report_to_device_params(report),
-    )
-
-
 async def _insert_position_record(
     connection: asyncpg.Connection,
     imei: str,
@@ -561,12 +480,6 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise DatabaseValueError("database datetimes must be timezone-aware")
     return value.astimezone(timezone.utc)
-
-
-def _validate_report_identity(report: TrackerReport) -> None:
-    _validate_imei(report.imei)
-    if not report.raw_data:
-        raise DatabaseValueError("raw_data must not be empty")
 
 
 def _validate_imei(imei: str) -> None:

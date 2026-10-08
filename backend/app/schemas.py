@@ -56,6 +56,7 @@ class DeviceResponse(BaseModel):
     csq: int | None
     wake_code: int | None
     battery_mv: int | None
+    battery_percent: int | None
 
 
 class TrackPointResponse(BaseModel):
@@ -76,5 +77,6 @@ class TrackPointResponse(BaseModel):
     csq: int
     wake_code: int
     battery_mv: int | None = None
+    battery_percent: int | None = None
     time_valid: bool | None = None
     record_seq: int | None = None

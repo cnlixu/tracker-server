@@ -210,7 +210,7 @@ From another machine, open `http://SERVER_PUBLIC_IP/`. An unauthenticated
 request must redirect to `/login.html`. Log in, verify the track map and device
 management page, then log out and confirm protected pages are no longer
 accessible. Test TCP 8686 separately with an actual tracker or an approved test
-client; Web authentication does not change the PTRK protocol.
+client; Web authentication does not change the JT/T 808 device protocol.
 
 Inspect service logs without exposing `.env` contents:
 
