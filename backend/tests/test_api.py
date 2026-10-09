@@ -8,7 +8,12 @@ from fastapi.testclient import TestClient
 
 from backend.app import api as api_module
 from backend.app.config import AuthSettings, OnlineStatusSettings
-from backend.app.database import DatabaseError, DeviceSnapshot, TrackPoint
+from backend.app.database import (
+    DatabaseError,
+    DeviceSnapshot,
+    TerminalRegistrationSnapshot,
+    TrackPoint,
+)
 from backend.app.main import create_app
 from backend.app.models import TerminalConfiguration
 
@@ -341,6 +346,55 @@ def test_terminal_configuration_update_creates_pending_revision(monkeypatch: Any
         "imei": IMEI,
         "changes": {"report_interval_sec": 300},
     }
+
+
+def test_terminal_registration_endpoint_exposes_profile_without_secret(
+    monkeypatch: Any,
+) -> None:
+    async def fake_registration(
+        pool: Any, imei: str
+    ) -> TerminalRegistrationSnapshot:
+        assert imei == IMEI
+        return TerminalRegistrationSnapshot(
+            terminal_phone="18508225213",
+            imei=IMEI,
+            province_id=43,
+            city_id=4301,
+            manufacturer_id="JZG43",
+            profile_magic="EPTR",
+            profile_version=1,
+            terminal_type=4,
+            capabilities=0x135F,
+            report_interval_sec=300,
+            service_point_id="SP-001",
+            asset_id="ASSET-001",
+            terminal_model="JZG043A",
+            terminal_sn=IMEI,
+            iccid="89860064221642652497",
+            hardware_version="Air780EGP",
+            software_version="001.999.015",
+            organization_code="ORG-01",
+            production_batch="202610",
+            profile_revision=0,
+            registered_at=NOW - timedelta(minutes=5),
+            last_registered_at=NOW - timedelta(minutes=1),
+            last_authenticated_at=NOW,
+        )
+
+    monkeypatch.setattr(api_module, "get_terminal_registration", fake_registration)
+    application, _ = build_test_app()
+    with TestClient(application) as client:
+        login(client)
+        response = client.get(f"/api/devices/{IMEI}/registration")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["terminal_phone"] == "18508225213"
+    assert body["iccid"] == "89860064221642652497"
+    assert body["capabilities"] == 0x135F
+    assert body["report_interval_sec"] == 300
+    assert "auth_code" not in body
+    assert "auth_code_hash" not in body
 
 
 def test_device_and_track_responses_expose_battery(monkeypatch: Any) -> None:

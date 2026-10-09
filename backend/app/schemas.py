@@ -75,6 +75,34 @@ class TerminalConfigurationResponse(BaseModel):
     organization_code: str
 
 
+class TerminalRegistrationResponse(BaseModel):
+    """Read-only EPTR registration profile; authentication secrets are excluded."""
+
+    terminal_phone: str
+    imei: str
+    province_id: int
+    city_id: int
+    manufacturer_id: str
+    profile_magic: str
+    profile_version: int
+    terminal_type: int
+    capabilities: int
+    report_interval_sec: int
+    service_point_id: str
+    asset_id: str
+    terminal_model: str
+    terminal_sn: str
+    iccid: str
+    hardware_version: str
+    software_version: str
+    organization_code: str
+    production_batch: str
+    profile_revision: int
+    registered_at: datetime
+    last_registered_at: datetime
+    last_authenticated_at: datetime | None
+
+
 class DeviceResponse(BaseModel):
     """Latest public state for one tracker device."""
 

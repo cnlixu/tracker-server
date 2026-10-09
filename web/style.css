@@ -84,7 +84,8 @@ h2 {
 
 .controls,
 .device-panel,
-.track-panel {
+.track-panel,
+.registration-panel {
   padding: 22px;
 }
 
@@ -191,6 +192,7 @@ button:disabled {
 }
 
 .device-panel .section-heading,
+.registration-panel .section-heading,
 .map-panel .section-heading {
   margin-bottom: 18px;
 }

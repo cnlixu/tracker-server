@@ -32,6 +32,27 @@
     csq: document.querySelector("#csq"),
     deviceBattery: document.querySelector("#device-battery"),
     wakeCode: document.querySelector("#wake-code"),
+    registrationPhone: document.querySelector("#registration-phone"),
+    registrationIccid: document.querySelector("#registration-iccid"),
+    registrationTerminalSn: document.querySelector("#registration-terminal-sn"),
+    registrationProvince: document.querySelector("#registration-province"),
+    registrationCity: document.querySelector("#registration-city"),
+    registrationManufacturer: document.querySelector("#registration-manufacturer"),
+    registrationModel: document.querySelector("#registration-model"),
+    registrationType: document.querySelector("#registration-type"),
+    registrationCapabilities: document.querySelector("#registration-capabilities"),
+    registrationInterval: document.querySelector("#registration-interval"),
+    registrationServicePoint: document.querySelector("#registration-service-point"),
+    registrationAsset: document.querySelector("#registration-asset"),
+    registrationHardware: document.querySelector("#registration-hardware"),
+    registrationSoftware: document.querySelector("#registration-software"),
+    registrationOrganization: document.querySelector("#registration-organization"),
+    registrationProductionBatch: document.querySelector("#registration-production-batch"),
+    registrationProfile: document.querySelector("#registration-profile"),
+    registrationRevision: document.querySelector("#registration-revision"),
+    registrationCreated: document.querySelector("#registration-created"),
+    registrationUpdated: document.querySelector("#registration-updated"),
+    registrationAuthenticated: document.querySelector("#registration-authenticated"),
     trackCount: document.querySelector("#track-count"),
     trackStartTime: document.querySelector("#track-start-time"),
     trackEndTime: document.querySelector("#track-end-time"),
@@ -253,7 +274,64 @@
       elements.altitude, elements.speed, elements.course, elements.satellites,
       elements.hdop, elements.csq, elements.deviceBattery, elements.wakeCode,
     ]) element.textContent = "—";
+    resetRegistrationDetails();
     setOnlineStatus();
+  }
+
+  function registrationElements() {
+    return [
+      elements.registrationPhone, elements.registrationIccid,
+      elements.registrationTerminalSn, elements.registrationProvince,
+      elements.registrationCity, elements.registrationManufacturer,
+      elements.registrationModel, elements.registrationType,
+      elements.registrationCapabilities, elements.registrationInterval,
+      elements.registrationServicePoint, elements.registrationAsset,
+      elements.registrationHardware, elements.registrationSoftware,
+      elements.registrationOrganization, elements.registrationProductionBatch,
+      elements.registrationProfile, elements.registrationRevision,
+      elements.registrationCreated, elements.registrationUpdated,
+      elements.registrationAuthenticated,
+    ];
+  }
+
+  function resetRegistrationDetails() {
+    for (const element of registrationElements()) element.textContent = "—";
+  }
+
+  function displayText(value) {
+    if (value === null || value === undefined || value === "") return "未配置";
+    return String(value);
+  }
+
+  function renderRegistration(registration) {
+    if (!registration || typeof registration !== "object") {
+      throw new Error("终端注册数据格式无效。");
+    }
+    elements.registrationPhone.textContent = displayText(registration.terminal_phone);
+    elements.registrationIccid.textContent = displayText(registration.iccid);
+    elements.registrationTerminalSn.textContent = displayText(registration.terminal_sn);
+    elements.registrationProvince.textContent = displayText(registration.province_id);
+    elements.registrationCity.textContent = displayText(registration.city_id);
+    elements.registrationManufacturer.textContent = displayText(registration.manufacturer_id);
+    elements.registrationModel.textContent = displayText(registration.terminal_model);
+    elements.registrationType.textContent = displayText(registration.terminal_type);
+    const capabilities = finiteNumber(registration.capabilities);
+    elements.registrationCapabilities.textContent = capabilities === null
+      ? "—" : `0x${Math.trunc(capabilities).toString(16).toUpperCase().padStart(8, "0")}`;
+    const interval = finiteNumber(registration.report_interval_sec);
+    elements.registrationInterval.textContent = interval === null
+      ? "—" : `${Math.trunc(interval)} 秒`;
+    elements.registrationServicePoint.textContent = displayText(registration.service_point_id);
+    elements.registrationAsset.textContent = displayText(registration.asset_id);
+    elements.registrationHardware.textContent = displayText(registration.hardware_version);
+    elements.registrationSoftware.textContent = displayText(registration.software_version);
+    elements.registrationOrganization.textContent = displayText(registration.organization_code);
+    elements.registrationProductionBatch.textContent = displayText(registration.production_batch);
+    elements.registrationProfile.textContent = `${displayText(registration.profile_magic)} v${displayText(registration.profile_version)}`;
+    elements.registrationRevision.textContent = displayText(registration.profile_revision);
+    elements.registrationCreated.textContent = formatBeijingTime(registration.registered_at);
+    elements.registrationUpdated.textContent = formatBeijingTime(registration.last_registered_at);
+    elements.registrationAuthenticated.textContent = formatBeijingTime(registration.last_authenticated_at);
   }
 
   function renderDevice(device) {
@@ -321,10 +399,15 @@
     elements.queryTrack.disabled = true;
     showMessage("正在加载设备最新状态…");
     try {
-      const device = await fetchJson(`/api/devices/${encodeURIComponent(imei)}/latest`);
+      const encodedImei = encodeURIComponent(imei);
+      const [device, registration] = await Promise.all([
+        fetchJson(`/api/devices/${encodedImei}/latest`),
+        fetchJson(`/api/devices/${encodedImei}/registration`),
+      ]);
       if (requestNumber !== latestRequestNumber) return;
       renderDevice(device);
-      showMessage("设备最新状态已更新。", "success");
+      renderRegistration(registration);
+      showMessage("设备最新状态和注册档案已更新。", "success");
     } catch (error) {
       if (requestNumber !== latestRequestNumber) return;
       resetDeviceDetails();

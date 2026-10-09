@@ -254,6 +254,17 @@ JOIN jt808_terminals t ON t.terminal_phone = c.terminal_phone
 WHERE t.imei = $1
 """
 
+GET_TERMINAL_REGISTRATION_BY_IMEI_SQL = """
+SELECT terminal_phone, imei, province_id, city_id, manufacturer_id,
+       profile_magic, profile_version, terminal_type, capabilities,
+       report_interval_sec, service_point_id, asset_id, terminal_model,
+       terminal_sn, iccid, hardware_version, software_version,
+       organization_code, production_batch, profile_revision,
+       registered_at, last_registered_at, last_authenticated_at
+FROM jt808_terminals
+WHERE imei = $1
+"""
+
 UPDATE_TERMINAL_CONFIG_SQL = """
 UPDATE jt808_terminal_configs c
 SET desired_revision = c.desired_revision + 1,
@@ -337,6 +348,35 @@ class TrackPoint:
     battery_percent: int | None = None
     time_valid: bool | None = None
     record_seq: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalRegistrationSnapshot:
+    """Persisted EPTR registration profile without credential material."""
+
+    terminal_phone: str
+    imei: str
+    province_id: int
+    city_id: int
+    manufacturer_id: str
+    profile_magic: str
+    profile_version: int
+    terminal_type: int
+    capabilities: int
+    report_interval_sec: int
+    service_point_id: str
+    asset_id: str
+    terminal_model: str
+    terminal_sn: str
+    iccid: str
+    hardware_version: str
+    software_version: str
+    organization_code: str
+    production_batch: str
+    profile_revision: int
+    registered_at: datetime
+    last_registered_at: datetime
+    last_authenticated_at: datetime | None
 
 
 async def init_pool(settings: DatabaseSettings | None = None) -> asyncpg.Pool:
@@ -666,6 +706,17 @@ async def get_terminal_configuration(
     async with pool.acquire() as connection:
         row = await connection.fetchrow(GET_TERMINAL_CONFIG_BY_IMEI_SQL, imei)
     return _terminal_configuration_from_row(row)
+
+
+async def get_terminal_registration(
+    pool: asyncpg.Pool,
+    imei: str,
+) -> TerminalRegistrationSnapshot | None:
+    """Return the latest EPTR registration profile for one device."""
+    _validate_auth_imei(imei)
+    async with pool.acquire() as connection:
+        row = await connection.fetchrow(GET_TERMINAL_REGISTRATION_BY_IMEI_SQL, imei)
+    return None if row is None else TerminalRegistrationSnapshot(**dict(row))
 
 
 async def update_terminal_configuration(

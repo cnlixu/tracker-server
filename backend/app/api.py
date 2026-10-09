@@ -21,6 +21,7 @@ from .database import (
     get_devices,
     get_track_points,
     get_terminal_configuration,
+    get_terminal_registration,
     update_terminal_configuration,
     update_device_name,
 )
@@ -31,6 +32,7 @@ from .schemas import (
     OnlineStatus,
     TerminalConfigurationResponse,
     TerminalConfigurationUpdate,
+    TerminalRegistrationResponse,
     TrackPointResponse,
 )
 
@@ -163,6 +165,24 @@ async def device_configuration(
     if config is None:
         raise HTTPException(status_code=404, detail="terminal configuration not found")
     return TerminalConfigurationResponse(**asdict(config))
+
+
+@router.get(
+    "/devices/{imei}/registration",
+    response_model=TerminalRegistrationResponse,
+)
+async def device_registration(
+    imei: ImeiPath,
+    _admin: AdminDependency,
+    pool: PoolDependency,
+) -> TerminalRegistrationResponse:
+    registration = await _run_database_call(
+        get_terminal_registration(pool, imei),
+        "get terminal registration",
+    )
+    if registration is None:
+        raise HTTPException(status_code=404, detail="terminal registration not found")
+    return TerminalRegistrationResponse(**asdict(registration))
 
 
 @router.put(
