@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import logging
 from typing import Protocol
 
@@ -12,8 +12,11 @@ import asyncpg
 from .config import TCPSettings, load_tcp_settings
 from .database import close_pool, init_pool
 from .jt808_protocol import (
+    MSG_TERMINAL_COMMON_ACK,
+    MSG_TERMINAL_PARAMETERS,
     MSG_LOCATION,
     MSG_LOCATION_BATCH,
+    MSG_SET_PARAMETERS,
     MSG_TERMINAL_AUTH,
     MSG_TERMINAL_REGISTER,
     FrameError,
@@ -24,11 +27,15 @@ from .jt808_protocol import (
     TrackerBatch,
     build_common_response,
     build_registration_response,
+    build_set_parameters,
     decode_frame,
     decode_location_message,
     parse_authentication,
     parse_registration,
+    parse_terminal_common_response,
+    parse_terminal_parameter_response,
 )
+from .models import TerminalConfiguration, TerminalRegistration
 from .services import TrackerService
 
 
@@ -37,8 +44,38 @@ READ_CHUNK_SIZE = 4096
 
 
 class ReportService(Protocol):
+    async def register_terminal(self, registration: TerminalRegistration) -> str:
+        """Persist registration and return the newly issued authentication code."""
+
+    async def authenticate_terminal(
+        self,
+        terminal_phone: str,
+        imei: str,
+        auth_code: str,
+    ) -> bool:
+        """Validate and bind the authentication identity."""
+
     async def process_batch(self, batch: TrackerBatch) -> int:
         """Persist one decoded location message atomically."""
+
+    async def get_pending_configuration(
+        self, terminal_phone: str
+    ) -> TerminalConfiguration | None:
+        """Return the latest configuration not yet acknowledged by the terminal."""
+
+    async def mark_configuration_sent(
+        self, terminal_phone: str, revision: int
+    ) -> None:
+        """Record one durable configuration delivery attempt."""
+
+    async def confirm_configuration(
+        self,
+        terminal_phone: str,
+        revision: int,
+        success: bool,
+        error: str | None = None,
+    ) -> None:
+        """Apply the terminal's 0x0001 result to desired/applied state."""
 
 
 @dataclass(slots=True)
@@ -46,6 +83,8 @@ class ConnectionState:
     reassembler: MessageReassembler = field(default_factory=MessageReassembler)
     authenticated: bool = False
     imei: str | None = None
+    terminal_phone: str | None = None
+    pending_commands: dict[int, tuple[int, int]] = field(default_factory=dict)
 
 
 class TrackerTCPServer:
@@ -62,6 +101,12 @@ class TrackerTCPServer:
         self._server: asyncio.Server | None = None
         self._client_tasks: set[asyncio.Task[None]] = set()
         self._client_writers: set[asyncio.StreamWriter] = set()
+        self._next_platform_serial = 0
+
+    def _allocate_platform_serial(self) -> int:
+        serial = self._next_platform_serial
+        self._next_platform_serial = (serial + 1) & 0xFFFF
+        return serial
 
     async def start(self) -> None:
         if self._server is not None:
@@ -165,9 +210,30 @@ class TrackerTCPServer:
         if frame.message_id == MSG_TERMINAL_AUTH:
             await self._handle_authentication(frame, writer, state, peer)
             return
-        if not state.authenticated or state.imei != frame.terminal_phone:
+        if not state.authenticated or state.terminal_phone != frame.terminal_phone:
             LOGGER.warning("unauthenticated JT/T 808 message client=%s", peer)
-            await _write(writer, build_common_response(frame, result=1))
+            await _write(
+                writer,
+                build_common_response(
+                    frame, self._allocate_platform_serial(), result=1
+                ),
+            )
+            return
+        if frame.message_id == MSG_TERMINAL_COMMON_ACK:
+            await self._handle_terminal_common_response(frame, state, peer)
+            return
+        if frame.message_id == MSG_TERMINAL_PARAMETERS:
+            try:
+                response = parse_terminal_parameter_response(frame)
+            except MessageError as exc:
+                LOGGER.warning("invalid parameter response client=%s error=%s", peer, exc)
+            else:
+                LOGGER.info(
+                    "terminal parameters client=%s response_serial=%s count=%s",
+                    peer,
+                    response.response_serial,
+                    len(response.parameters),
+                )
             return
         if frame.message_id not in (MSG_LOCATION, MSG_LOCATION_BATCH):
             LOGGER.warning(
@@ -175,14 +241,26 @@ class TrackerTCPServer:
                 peer,
                 frame.message_id,
             )
-            await _write(writer, build_common_response(frame, result=3))
+            await _write(
+                writer,
+                build_common_response(
+                    frame, self._allocate_platform_serial(), result=3
+                ),
+            )
             return
 
         try:
             batch = decode_location_message(frame)
+            assert state.imei is not None
+            batch = replace(batch, imei=state.imei)
         except MessageError as exc:
             LOGGER.warning("invalid location message client=%s error=%s", peer, exc)
-            await _write(writer, build_common_response(frame, result=2))
+            await _write(
+                writer,
+                build_common_response(
+                    frame, self._allocate_platform_serial(), result=2
+                ),
+            )
             return
         try:
             inserted = await self.service.process_batch(batch)
@@ -196,7 +274,12 @@ class TrackerTCPServer:
                 batch.generation_id,
                 batch.batch_id,
             )
-            await _write(writer, build_common_response(frame, result=1))
+            await _write(
+                writer,
+                build_common_response(
+                    frame, self._allocate_platform_serial(), result=1
+                ),
+            )
             return
         LOGGER.info(
             "location persisted client=%s imei=%s records=%s inserted=%s",
@@ -206,7 +289,10 @@ class TrackerTCPServer:
             inserted,
         )
         # ACK is emitted only after the database transaction has committed.
-        await _write(writer, build_common_response(frame, result=0))
+        await _write(
+            writer,
+            build_common_response(frame, self._allocate_platform_serial(), result=0),
+        )
 
     async def _handle_registration(
         self,
@@ -215,17 +301,40 @@ class TrackerTCPServer:
         peer: str,
     ) -> None:
         try:
-            parse_registration(frame)
+            registration = parse_registration(frame)
         except MessageError as exc:
             LOGGER.warning("invalid registration client=%s error=%s", peer, exc)
             await _write(
                 writer,
-                build_registration_response(frame, self.settings.auth_code, result=4),
+                build_registration_response(
+                    frame, "", self._allocate_platform_serial(), result=4
+                ),
             )
             return
+        try:
+            auth_code = await self.service.register_terminal(registration)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # No response is safer for transient persistence failures: the
+            # terminal will time out and retry registration unchanged.
+            LOGGER.exception(
+                "terminal registration persistence failed client=%s terminal=%s",
+                peer,
+                frame.terminal_phone,
+            )
+            return
+        LOGGER.info(
+            "terminal registered client=%s terminal=%s terminal_sn=%s",
+            peer,
+            frame.terminal_phone,
+            registration.terminal_sn,
+        )
         await _write(
             writer,
-            build_registration_response(frame, self.settings.auth_code, result=0),
+            build_registration_response(
+                frame, auth_code, self._allocate_platform_serial(), result=0
+            ),
         )
 
     async def _handle_authentication(
@@ -239,14 +348,131 @@ class TrackerTCPServer:
             auth_code, imei = parse_authentication(frame)
         except (MessageError, UnicodeError) as exc:
             LOGGER.warning("invalid authentication client=%s error=%s", peer, exc)
-            await _write(writer, build_common_response(frame, result=2))
+            await _write(
+                writer,
+                build_common_response(
+                    frame, self._allocate_platform_serial(), result=2
+                ),
+            )
             return
-        accepted = auth_code == self.settings.auth_code and imei == frame.terminal_phone
+        try:
+            accepted = await self.service.authenticate_terminal(
+                frame.terminal_phone,
+                imei,
+                auth_code,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception(
+                "terminal authentication lookup failed client=%s terminal=%s",
+                peer,
+                frame.terminal_phone,
+            )
+            return
         if accepted:
             state.authenticated = True
             state.imei = imei
-        LOGGER.info("tracker authentication client=%s imei=%s ok=%s", peer, imei, accepted)
-        await _write(writer, build_common_response(frame, result=0 if accepted else 1))
+            state.terminal_phone = frame.terminal_phone
+        LOGGER.info(
+            "tracker authentication client=%s terminal=%s imei=%s ok=%s",
+            peer,
+            frame.terminal_phone,
+            imei,
+            accepted,
+        )
+        await _write(
+            writer,
+            build_common_response(
+                frame,
+                self._allocate_platform_serial(),
+                result=0 if accepted else 1,
+            ),
+        )
+        if accepted:
+            await self._send_pending_configuration(writer, state, peer)
+
+    async def _send_pending_configuration(
+        self,
+        writer: asyncio.StreamWriter,
+        state: ConnectionState,
+        peer: str,
+    ) -> None:
+        assert state.terminal_phone is not None
+        try:
+            config = await self.service.get_pending_configuration(
+                state.terminal_phone
+            )
+            if config is None:
+                return
+            serial = self._allocate_platform_serial()
+            state.pending_commands[serial] = (MSG_SET_PARAMETERS, config.revision)
+            await _write(writer, build_set_parameters(config, serial))
+            await self.service.mark_configuration_sent(
+                state.terminal_phone, config.revision
+            )
+            LOGGER.info(
+                "terminal configuration sent client=%s terminal=%s revision=%s serial=%s",
+                peer,
+                state.terminal_phone,
+                config.revision,
+                serial,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception(
+                "terminal configuration delivery failed client=%s terminal=%s",
+                peer,
+                state.terminal_phone,
+            )
+
+    async def _handle_terminal_common_response(
+        self,
+        frame: JT808Frame,
+        state: ConnectionState,
+        peer: str,
+    ) -> None:
+        try:
+            response = parse_terminal_common_response(frame)
+        except MessageError as exc:
+            LOGGER.warning("invalid terminal response client=%s error=%s", peer, exc)
+            return
+        pending = state.pending_commands.get(response.response_serial)
+        if pending is None or pending[0] != response.response_message_id:
+            LOGGER.warning(
+                "unmatched terminal response client=%s serial=%s message_id=0x%04X",
+                peer,
+                response.response_serial,
+                response.response_message_id,
+            )
+            return
+        state.pending_commands.pop(response.response_serial, None)
+        _, revision = pending
+        assert state.terminal_phone is not None
+        success = response.result == 0
+        try:
+            await self.service.confirm_configuration(
+                state.terminal_phone,
+                revision,
+                success,
+                None if success else f"terminal result {response.result}",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception(
+                "terminal configuration confirmation failed client=%s revision=%s",
+                peer,
+                revision,
+            )
+            return
+        LOGGER.info(
+            "terminal configuration confirmed client=%s revision=%s result=%s",
+            peer,
+            revision,
+            response.result,
+        )
 
 
 async def _write(writer: asyncio.StreamWriter, data: bytes) -> None:

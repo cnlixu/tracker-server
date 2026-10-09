@@ -10,6 +10,7 @@ from backend.app import api as api_module
 from backend.app.config import AuthSettings, OnlineStatusSettings
 from backend.app.database import DatabaseError, DeviceSnapshot, TrackPoint
 from backend.app.main import create_app
+from backend.app.models import TerminalConfiguration
 
 
 NOW = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
@@ -282,6 +283,64 @@ def test_device_name_can_be_updated(monkeypatch: Any) -> None:
     assert response.status_code == 200
     assert response.json()["name"] == "测试车"
     assert captured == {"imei": IMEI, "name": "测试车"}
+
+
+def test_terminal_configuration_update_creates_pending_revision(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_get(pool: Any, imei: str) -> TerminalConfiguration:
+        return TerminalConfiguration(
+            terminal_phone="18508225213",
+            revision=3,
+            applied_revision=3,
+            status="applied",
+            province_id=43,
+            city_id=4301,
+            terminal_type=4,
+            report_interval_sec=900,
+            service_point_id="SP-001",
+            asset_id="ASSET-001",
+            organization_code="ORG-01",
+        )
+
+    async def fake_update(
+        pool: Any, imei: str, changes: dict[str, object]
+    ) -> TerminalConfiguration:
+        captured.update(imei=imei, changes=changes)
+        value = await fake_get(pool, imei)
+        return TerminalConfiguration(
+            terminal_phone=value.terminal_phone,
+            revision=4,
+            applied_revision=3,
+            status="pending",
+            province_id=value.province_id,
+            city_id=value.city_id,
+            terminal_type=value.terminal_type,
+            report_interval_sec=int(changes["report_interval_sec"]),
+            service_point_id=value.service_point_id,
+            asset_id=value.asset_id,
+            organization_code=value.organization_code,
+        )
+
+    monkeypatch.setattr(api_module, "get_terminal_configuration", fake_get)
+    monkeypatch.setattr(api_module, "update_terminal_configuration", fake_update)
+    application, _ = build_test_app()
+    with TestClient(application) as client:
+        login(client)
+        current = client.get(f"/api/devices/{IMEI}/configuration")
+        updated = client.put(
+            f"/api/devices/{IMEI}/configuration",
+            json={"report_interval_sec": 300},
+        )
+    assert current.status_code == 200
+    assert current.json()["revision"] == 3
+    assert updated.status_code == 200
+    assert updated.json()["status"] == "pending"
+    assert updated.json()["revision"] == 4
+    assert captured == {
+        "imei": IMEI,
+        "changes": {"report_interval_sec": 300},
+    }
 
 
 def test_device_and_track_responses_expose_battery(monkeypatch: Any) -> None:

@@ -38,7 +38,6 @@ class TCPSettings:
     host: str = "0.0.0.0"
     port: int = 8686
     read_timeout_seconds: float = 600.0
-    auth_code: str = "JZG043A"
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +96,6 @@ def load_tcp_settings(env_file: str | Path | None = None) -> TCPSettings:
         host=os.getenv("TCP_HOST", "0.0.0.0").strip(),
         port=_as_int("TCP_PORT", 8686),
         read_timeout_seconds=_as_float("TCP_READ_TIMEOUT_SECONDS", 600.0),
-        auth_code=os.getenv("JT808_AUTH_CODE", "JZG043A").strip(),
     )
     if not settings.host:
         raise ConfigurationError("TCP_HOST must not be empty")
@@ -105,8 +103,6 @@ def load_tcp_settings(env_file: str | Path | None = None) -> TCPSettings:
         raise ConfigurationError("TCP_PORT must be between 1 and 65535")
     if settings.read_timeout_seconds <= 0:
         raise ConfigurationError("TCP_READ_TIMEOUT_SECONDS must be positive")
-    if not settings.auth_code or not settings.auth_code.isascii() or len(settings.auth_code) > 255:
-        raise ConfigurationError("JT808_AUTH_CODE must contain 1 to 255 ASCII characters")
     return settings
 
 

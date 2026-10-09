@@ -1,9 +1,9 @@
 """JT/T 808-2019 codec for the trimmed power-tracker profile.
 
 Supported terminal messages are registration (0x0100), authentication
-(0x0102), one location (0x0200), and batched blind-area locations (0x0704).
-The platform emits registration response (0x8100) and common response
-(0x8001). Other JT/T 808 functions are intentionally outside this product.
+(0x0102), parameter response (0x0104), terminal common response (0x0001),
+one location (0x0200), and batched blind-area locations (0x0704). The
+platform also supports parameter setting/query (0x8103/0x8104/0x8106).
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
-from .models import TrackerRecord
+from .models import TerminalConfiguration, TerminalRegistration, TrackerRecord
 
 
 FLAG = 0x7E
@@ -24,10 +24,38 @@ MAX_BATCH_RECORDS = 512
 
 MSG_TERMINAL_REGISTER = 0x0100
 MSG_TERMINAL_AUTH = 0x0102
+MSG_TERMINAL_COMMON_ACK = 0x0001
+MSG_TERMINAL_PARAMETERS = 0x0104
 MSG_LOCATION = 0x0200
 MSG_LOCATION_BATCH = 0x0704
 MSG_PLATFORM_COMMON_ACK = 0x8001
 MSG_REGISTER_ACK = 0x8100
+MSG_SET_PARAMETERS = 0x8103
+MSG_QUERY_ALL_PARAMETERS = 0x8104
+MSG_QUERY_PARAMETERS = 0x8106
+
+EPTR_MAGIC = b"EPTR"
+EPTR_PROFILE_VERSION = 1
+REG_TLV_SERVICE_POINT = 0x01
+REG_TLV_ASSET_ID = 0x02
+REG_TLV_TERMINAL_MODEL = 0x03
+REG_TLV_TERMINAL_SN = 0x04
+REG_TLV_IMEI = 0x05
+REG_TLV_ICCID = 0x06
+REG_TLV_HARDWARE_VERSION = 0x07
+REG_TLV_SOFTWARE_VERSION = 0x08
+REG_TLV_ORGANIZATION = 0x09
+REG_TLV_PRODUCTION_BATCH = 0x0A
+REG_TLV_PROFILE_REVISION = 0x0B
+
+PARAM_REPORT_INTERVAL = 0x00000029
+PARAM_PROFILE_REVISION = 0x0000F100
+PARAM_PROVINCE_ID = 0x0000F101
+PARAM_CITY_ID = 0x0000F102
+PARAM_TERMINAL_TYPE = 0x0000F103
+PARAM_SERVICE_POINT = 0x0000F104
+PARAM_ASSET_ID = 0x0000F105
+PARAM_ORGANIZATION = 0x0000F106
 
 EXTRA_SIGNAL = 0x30
 EXTRA_SATELLITES = 0x31
@@ -72,6 +100,19 @@ class TrackerBatch:
     @property
     def record_count(self) -> int:
         return len(self.records)
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalCommonResponse:
+    response_serial: int
+    response_message_id: int
+    result: int
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalParameterResponse:
+    response_serial: int
+    parameters: dict[int, bytes]
 
 
 def xor_checksum(data: bytes) -> int:
@@ -259,9 +300,105 @@ class MessageReassembler:
         return replace(frame, body=body, package_total=None, package_index=None)
 
 
-def parse_registration(frame: JT808Frame) -> None:
-    if frame.message_id != MSG_TERMINAL_REGISTER or len(frame.body) < 76:
+def _decode_registration_text(value: bytes, field_name: str) -> str:
+    try:
+        return value.rstrip(b"\x00").decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise MessageError(
+            f"terminal registration {field_name} is not valid UTF-8"
+        ) from exc
+
+
+def parse_registration(frame: JT808Frame) -> TerminalRegistration:
+    if frame.message_id != MSG_TERMINAL_REGISTER or len(frame.body) < 30:
         raise MessageError("invalid terminal registration body")
+    body = frame.body
+    if body[15:19] != EPTR_MAGIC:
+        raise MessageError("terminal registration is not the EPTR profile")
+    profile_version = body[19]
+    if profile_version != EPTR_PROFILE_VERSION:
+        raise MessageError("unsupported EPTR registration profile version")
+    tlv_count = body[29]
+    values: dict[int, bytes] = {}
+    offset = 30
+    for _ in range(tlv_count):
+        if offset + 2 > len(body):
+            raise MessageError("truncated EPTR registration item")
+        item_id, length = body[offset], body[offset + 1]
+        offset += 2
+        if item_id in values or offset + length > len(body):
+            raise MessageError("invalid EPTR registration item")
+        values[item_id] = body[offset : offset + length]
+        offset += length
+    if offset != len(body):
+        raise MessageError("trailing bytes after EPTR registration")
+
+    def text(
+        item_id: int,
+        name: str,
+        *,
+        required: bool = False,
+        max_bytes: int = 255,
+    ) -> str:
+        raw = values.get(item_id, b"")
+        if len(raw) > max_bytes:
+            raise MessageError(f"terminal registration {name} is too long")
+        value = _decode_registration_text(raw, name)
+        if required and not value:
+            raise MessageError(f"terminal registration {name} is required")
+        return value
+
+    imei = text(REG_TLV_IMEI, "IMEI", required=True)
+    iccid = text(REG_TLV_ICCID, "ICCID", required=True)
+    if len(imei) != 15 or not imei.isascii() or not imei.isdecimal():
+        raise MessageError("terminal registration IMEI is invalid")
+    if not 18 <= len(iccid) <= 22 or not iccid.isascii() or not iccid.isdecimal():
+        raise MessageError("terminal registration ICCID is invalid")
+    terminal_type = body[20]
+    report_interval = int.from_bytes(body[25:29], "big")
+    if terminal_type == 0:
+        raise MessageError("terminal registration type is invalid")
+    if not 5 <= report_interval <= 86400:
+        raise MessageError("terminal registration report interval is invalid")
+    revision_raw = values.get(REG_TLV_PROFILE_REVISION, b"\x00\x00\x00\x00")
+    if len(revision_raw) != 4:
+        raise MessageError("terminal registration profile revision is invalid")
+    return TerminalRegistration(
+        terminal_phone=frame.terminal_phone,
+        province_id=int.from_bytes(body[0:2], "big"),
+        city_id=int.from_bytes(body[2:4], "big"),
+        manufacturer_id=_decode_registration_text(body[4:15], "manufacturer ID"),
+        profile_magic="EPTR",
+        profile_version=profile_version,
+        terminal_type=terminal_type,
+        capabilities=int.from_bytes(body[21:25], "big"),
+        report_interval_sec=report_interval,
+        service_point_id=text(
+            REG_TLV_SERVICE_POINT, "service point ID", max_bytes=32
+        ),
+        asset_id=text(REG_TLV_ASSET_ID, "asset ID", max_bytes=64),
+        terminal_model=text(
+            REG_TLV_TERMINAL_MODEL, "terminal model", required=True, max_bytes=30
+        ),
+        terminal_sn=text(
+            REG_TLV_TERMINAL_SN, "terminal SN", required=True, max_bytes=32
+        ),
+        imei=imei,
+        iccid=iccid,
+        hardware_version=text(
+            REG_TLV_HARDWARE_VERSION, "hardware version", max_bytes=16
+        ),
+        software_version=text(
+            REG_TLV_SOFTWARE_VERSION, "software version", max_bytes=32
+        ),
+        organization_code=text(
+            REG_TLV_ORGANIZATION, "organization code", max_bytes=32
+        ),
+        production_batch=text(
+            REG_TLV_PRODUCTION_BATCH, "production batch", max_bytes=32
+        ),
+        profile_revision=int.from_bytes(revision_raw, "big"),
+    )
 
 
 def parse_authentication(frame: JT808Frame) -> tuple[str, str]:
@@ -278,20 +415,111 @@ def parse_authentication(frame: JT808Frame) -> tuple[str, str]:
     return auth_code, imei
 
 
-def build_registration_response(frame: JT808Frame, auth_code: str, result: int = 0) -> bytes:
+def build_registration_response(
+    frame: JT808Frame,
+    auth_code: str,
+    platform_serial: int,
+    result: int = 0,
+) -> bytes:
     body = frame.message_serial.to_bytes(2, "big") + bytes([result])
     if result == 0:
         body += auth_code.encode("ascii")
-    return build_frame(MSG_REGISTER_ACK, frame.terminal_phone, 0, body)
+    return build_frame(MSG_REGISTER_ACK, frame.terminal_phone, platform_serial, body)
 
 
-def build_common_response(frame: JT808Frame, result: int = 0) -> bytes:
+def build_common_response(
+    frame: JT808Frame,
+    platform_serial: int,
+    result: int = 0,
+) -> bytes:
     body = (
         frame.message_serial.to_bytes(2, "big")
         + frame.message_id.to_bytes(2, "big")
         + bytes([result])
     )
-    return build_frame(MSG_PLATFORM_COMMON_ACK, frame.terminal_phone, 0, body)
+    return build_frame(
+        MSG_PLATFORM_COMMON_ACK, frame.terminal_phone, platform_serial, body
+    )
+
+
+def _parameter_item(parameter_id: int, value: bytes) -> bytes:
+    if len(value) > 255:
+        raise MessageError("JT/T 808 parameter value exceeds 255 bytes")
+    return parameter_id.to_bytes(4, "big") + bytes([len(value)]) + value
+
+
+def configuration_parameter_values(config: TerminalConfiguration) -> dict[int, bytes]:
+    """Encode the complete mutable project profile using 808 parameter items."""
+    return {
+        PARAM_PROFILE_REVISION: config.revision.to_bytes(4, "big"),
+        PARAM_REPORT_INTERVAL: config.report_interval_sec.to_bytes(4, "big"),
+        PARAM_PROVINCE_ID: config.province_id.to_bytes(2, "big"),
+        PARAM_CITY_ID: config.city_id.to_bytes(2, "big"),
+        PARAM_TERMINAL_TYPE: bytes([config.terminal_type]),
+        PARAM_SERVICE_POINT: config.service_point_id.encode("utf-8"),
+        PARAM_ASSET_ID: config.asset_id.encode("utf-8"),
+        PARAM_ORGANIZATION: config.organization_code.encode("utf-8"),
+    }
+
+
+def build_set_parameters(config: TerminalConfiguration, platform_serial: int) -> bytes:
+    values = configuration_parameter_values(config)
+    body = bytes([len(values)]) + b"".join(
+        _parameter_item(parameter_id, value)
+        for parameter_id, value in values.items()
+    )
+    return build_frame(
+        MSG_SET_PARAMETERS, config.terminal_phone, platform_serial, body
+    )
+
+
+def build_query_parameters(
+    terminal_phone: str,
+    platform_serial: int,
+    parameter_ids: tuple[int, ...] | None = None,
+) -> bytes:
+    if parameter_ids is None:
+        return build_frame(
+            MSG_QUERY_ALL_PARAMETERS, terminal_phone, platform_serial, b""
+        )
+    if len(parameter_ids) > 255:
+        raise MessageError("too many queried terminal parameters")
+    body = bytes([len(parameter_ids)]) + b"".join(
+        parameter_id.to_bytes(4, "big") for parameter_id in parameter_ids
+    )
+    return build_frame(MSG_QUERY_PARAMETERS, terminal_phone, platform_serial, body)
+
+
+def parse_terminal_common_response(frame: JT808Frame) -> TerminalCommonResponse:
+    if frame.message_id != MSG_TERMINAL_COMMON_ACK or len(frame.body) != 5:
+        raise MessageError("invalid terminal common response")
+    return TerminalCommonResponse(
+        response_serial=int.from_bytes(frame.body[0:2], "big"),
+        response_message_id=int.from_bytes(frame.body[2:4], "big"),
+        result=frame.body[4],
+    )
+
+
+def parse_terminal_parameter_response(frame: JT808Frame) -> TerminalParameterResponse:
+    if frame.message_id != MSG_TERMINAL_PARAMETERS or len(frame.body) < 3:
+        raise MessageError("invalid terminal parameter response")
+    response_serial = int.from_bytes(frame.body[0:2], "big")
+    count = frame.body[2]
+    offset = 3
+    parameters: dict[int, bytes] = {}
+    for _ in range(count):
+        if offset + 5 > len(frame.body):
+            raise MessageError("truncated terminal parameter item")
+        parameter_id = int.from_bytes(frame.body[offset : offset + 4], "big")
+        length = frame.body[offset + 4]
+        offset += 5
+        if parameter_id in parameters or offset + length > len(frame.body):
+            raise MessageError("invalid terminal parameter item")
+        parameters[parameter_id] = frame.body[offset : offset + length]
+        offset += length
+    if offset != len(frame.body):
+        raise MessageError("trailing bytes after terminal parameters")
+    return TerminalParameterResponse(response_serial, parameters)
 
 
 def decode_location_message(frame: JT808Frame) -> TrackerBatch:

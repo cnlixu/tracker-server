@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 
 import asyncpg
 
 from .config import DatabaseSettings, load_database_settings
-from .models import TrackerRecord
+from .models import TerminalConfiguration, TerminalRegistration, TrackerRecord
 
 
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "sql" / "schema.sql"
@@ -156,6 +157,127 @@ ORDER BY gps_time ASC, id ASC
 LIMIT $4
 """
 
+UPSERT_TERMINAL_REGISTRATION_SQL = """
+INSERT INTO jt808_terminals (
+    terminal_phone, imei, auth_code_hash, province_id, city_id,
+    manufacturer_id, terminal_model, terminal_id, plate_color, plate_number,
+    profile_magic, profile_version, terminal_type, capabilities,
+    report_interval_sec, service_point_id, asset_id, terminal_sn, iccid,
+    hardware_version, software_version, organization_code, production_batch,
+    profile_revision,
+    registered_at, last_registered_at
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, 0, '', $9, $10, $11, $12,
+    $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, NOW(), NOW()
+)
+ON CONFLICT (terminal_phone) DO UPDATE SET
+    auth_code_hash = EXCLUDED.auth_code_hash,
+    imei = EXCLUDED.imei,
+    province_id = EXCLUDED.province_id,
+    city_id = EXCLUDED.city_id,
+    manufacturer_id = EXCLUDED.manufacturer_id,
+    terminal_model = EXCLUDED.terminal_model,
+    terminal_id = EXCLUDED.terminal_id,
+    profile_magic = EXCLUDED.profile_magic,
+    profile_version = EXCLUDED.profile_version,
+    terminal_type = EXCLUDED.terminal_type,
+    capabilities = EXCLUDED.capabilities,
+    report_interval_sec = EXCLUDED.report_interval_sec,
+    service_point_id = EXCLUDED.service_point_id,
+    asset_id = EXCLUDED.asset_id,
+    terminal_sn = EXCLUDED.terminal_sn,
+    iccid = EXCLUDED.iccid,
+    hardware_version = EXCLUDED.hardware_version,
+    software_version = EXCLUDED.software_version,
+    organization_code = EXCLUDED.organization_code,
+    production_batch = EXCLUDED.production_batch,
+    profile_revision = EXCLUDED.profile_revision,
+    last_registered_at = NOW()
+"""
+
+INSERT_INITIAL_TERMINAL_CONFIG_SQL = """
+INSERT INTO jt808_terminal_configs (
+    terminal_phone, desired_revision, applied_revision,
+    desired_parameters, applied_parameters, status, last_applied_at
+)
+VALUES ($1, $2, $2, $3::JSONB, $3::JSONB, 'applied', NOW())
+ON CONFLICT (terminal_phone) DO NOTHING
+"""
+
+RECONCILE_REGISTERED_TERMINAL_CONFIG_SQL = """
+UPDATE jt808_terminal_configs
+SET desired_revision = CASE
+        WHEN $2 > desired_revision
+          OR ($2 = desired_revision AND desired_parameters <> $3::JSONB)
+        THEN $2 + 1 ELSE desired_revision END,
+    applied_revision = $2,
+    applied_parameters = $3::JSONB,
+    status = CASE
+        WHEN $2 = desired_revision AND desired_parameters = $3::JSONB
+        THEN 'applied' ELSE 'pending' END,
+    last_error = NULL,
+    last_applied_at = NOW(),
+    updated_at = NOW()
+WHERE terminal_phone = $1
+"""
+
+GET_PENDING_TERMINAL_CONFIG_SQL = """
+SELECT terminal_phone, desired_revision, applied_revision,
+       desired_parameters, status
+FROM jt808_terminal_configs
+WHERE terminal_phone = $1 AND desired_revision > applied_revision
+"""
+
+MARK_TERMINAL_CONFIG_SENT_SQL = """
+UPDATE jt808_terminal_configs
+SET status = 'sent', last_sent_at = NOW(), updated_at = NOW()
+WHERE terminal_phone = $1 AND desired_revision = $2
+"""
+
+CONFIRM_TERMINAL_CONFIG_SQL = """
+UPDATE jt808_terminal_configs
+SET applied_revision = CASE WHEN $3 THEN $2 ELSE applied_revision END,
+    applied_parameters = CASE WHEN $3 THEN desired_parameters ELSE applied_parameters END,
+    status = CASE WHEN $3 THEN 'applied' ELSE 'failed' END,
+    last_error = CASE WHEN $3 THEN NULL ELSE $4 END,
+    last_applied_at = CASE WHEN $3 THEN NOW() ELSE last_applied_at END,
+    updated_at = NOW()
+WHERE terminal_phone = $1 AND desired_revision = $2
+"""
+
+GET_TERMINAL_CONFIG_BY_IMEI_SQL = """
+SELECT c.terminal_phone, c.desired_revision, c.applied_revision,
+       c.desired_parameters, c.status
+FROM jt808_terminal_configs c
+JOIN jt808_terminals t ON t.terminal_phone = c.terminal_phone
+WHERE t.imei = $1
+"""
+
+UPDATE_TERMINAL_CONFIG_SQL = """
+UPDATE jt808_terminal_configs c
+SET desired_revision = c.desired_revision + 1,
+    desired_parameters = $2::JSONB,
+    status = 'pending', last_error = NULL, updated_at = NOW()
+FROM jt808_terminals t
+WHERE t.imei = $1 AND t.terminal_phone = c.terminal_phone
+RETURNING c.terminal_phone, c.desired_revision, c.applied_revision,
+          c.desired_parameters, c.status
+"""
+
+GET_TERMINAL_AUTH_HASH_SQL = """
+SELECT t.auth_code_hash, t.imei
+FROM jt808_terminals t
+JOIN jt808_terminal_configs c ON c.terminal_phone = t.terminal_phone
+WHERE t.terminal_phone = $1
+"""
+
+MARK_TERMINAL_AUTHENTICATED_SQL = """
+UPDATE jt808_terminals
+SET imei = COALESCE(imei, $2), last_authenticated_at = NOW()
+WHERE terminal_phone = $1 AND (imei IS NULL OR imei = $2)
+RETURNING terminal_phone
+"""
 
 class DatabaseError(RuntimeError):
     """Base class for database-layer failures with application context."""
@@ -445,6 +567,202 @@ async def get_track_points(
     return [TrackPoint(**dict(record)) for record in records]
 
 
+async def save_terminal_registration(
+    pool: asyncpg.Pool,
+    registration: TerminalRegistration,
+    auth_code_hash: str,
+) -> None:
+    """Persist the credential issued by the latest successful registration."""
+    _validate_terminal_phone(registration.terminal_phone)
+    if len(auth_code_hash) != 64 or any(
+        character not in "0123456789abcdef" for character in auth_code_hash
+    ):
+        raise DatabaseValueError("auth_code_hash must be a lowercase SHA-256 digest")
+    parameters = _registration_parameters(registration)
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                UPSERT_TERMINAL_REGISTRATION_SQL,
+                registration.terminal_phone,
+                registration.imei,
+                auth_code_hash,
+                registration.province_id,
+                registration.city_id,
+                registration.manufacturer_id,
+                registration.terminal_model,
+                registration.terminal_sn,
+                registration.profile_magic,
+                registration.profile_version,
+                registration.terminal_type,
+                registration.capabilities,
+                registration.report_interval_sec,
+                registration.service_point_id,
+                registration.asset_id,
+                registration.terminal_sn,
+                registration.iccid,
+                registration.hardware_version,
+                registration.software_version,
+                registration.organization_code,
+                registration.production_batch,
+                registration.profile_revision,
+            )
+            await connection.execute(
+                INSERT_INITIAL_TERMINAL_CONFIG_SQL,
+                registration.terminal_phone,
+                registration.profile_revision,
+                json.dumps(parameters, ensure_ascii=False),
+            )
+            await connection.execute(
+                RECONCILE_REGISTERED_TERMINAL_CONFIG_SQL,
+                registration.terminal_phone,
+                registration.profile_revision,
+                json.dumps(parameters, ensure_ascii=False),
+            )
+
+
+async def get_pending_terminal_configuration(
+    pool: asyncpg.Pool,
+    terminal_phone: str,
+) -> TerminalConfiguration | None:
+    _validate_terminal_phone(terminal_phone)
+    async with pool.acquire() as connection:
+        row = await connection.fetchrow(GET_PENDING_TERMINAL_CONFIG_SQL, terminal_phone)
+    return _terminal_configuration_from_row(row)
+
+
+async def mark_terminal_configuration_sent(
+    pool: asyncpg.Pool,
+    terminal_phone: str,
+    revision: int,
+) -> None:
+    async with pool.acquire() as connection:
+        await connection.execute(
+            MARK_TERMINAL_CONFIG_SENT_SQL, terminal_phone, revision
+        )
+
+
+async def confirm_terminal_configuration(
+    pool: asyncpg.Pool,
+    terminal_phone: str,
+    revision: int,
+    success: bool,
+    error: str | None = None,
+) -> None:
+    async with pool.acquire() as connection:
+        await connection.execute(
+            CONFIRM_TERMINAL_CONFIG_SQL,
+            terminal_phone,
+            revision,
+            success,
+            error,
+        )
+
+
+async def get_terminal_configuration(
+    pool: asyncpg.Pool,
+    imei: str,
+) -> TerminalConfiguration | None:
+    _validate_auth_imei(imei)
+    async with pool.acquire() as connection:
+        row = await connection.fetchrow(GET_TERMINAL_CONFIG_BY_IMEI_SQL, imei)
+    return _terminal_configuration_from_row(row)
+
+
+async def update_terminal_configuration(
+    pool: asyncpg.Pool,
+    imei: str,
+    changes: dict[str, object],
+) -> TerminalConfiguration | None:
+    _validate_auth_imei(imei)
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            row = await connection.fetchrow(GET_TERMINAL_CONFIG_BY_IMEI_SQL, imei)
+            if row is None:
+                return None
+            parameters = _decode_json_parameters(row["desired_parameters"])
+            parameters.update(changes)
+            row = await connection.fetchrow(
+                UPDATE_TERMINAL_CONFIG_SQL,
+                imei,
+                json.dumps(parameters, ensure_ascii=False),
+            )
+    return _terminal_configuration_from_row(row)
+
+
+def _registration_parameters(registration: TerminalRegistration) -> dict[str, object]:
+    return {
+        "province_id": registration.province_id,
+        "city_id": registration.city_id,
+        "terminal_type": registration.terminal_type,
+        "report_interval_sec": registration.report_interval_sec,
+        "service_point_id": registration.service_point_id,
+        "asset_id": registration.asset_id,
+        "organization_code": registration.organization_code,
+    }
+
+
+def _terminal_configuration_from_row(row: object) -> TerminalConfiguration | None:
+    if row is None:
+        return None
+    parameters = _decode_json_parameters(row["desired_parameters"])
+    return TerminalConfiguration(
+        terminal_phone=str(row["terminal_phone"]),
+        revision=int(row["desired_revision"]),
+        applied_revision=int(row["applied_revision"]),
+        status=str(row["status"]),
+        province_id=int(parameters["province_id"]),
+        city_id=int(parameters["city_id"]),
+        terminal_type=int(parameters["terminal_type"]),
+        report_interval_sec=int(parameters["report_interval_sec"]),
+        service_point_id=str(parameters.get("service_point_id", "")),
+        asset_id=str(parameters.get("asset_id", "")),
+        organization_code=str(parameters.get("organization_code", "")),
+    )
+
+
+def _decode_json_parameters(value: object) -> dict[str, object]:
+    if isinstance(value, str):
+        decoded = json.loads(value)
+    else:
+        decoded = value
+    if not isinstance(decoded, dict):
+        raise DatabaseValueError("terminal parameters must be a JSON object")
+    return decoded
+
+
+async def get_terminal_auth_credential(
+    pool: asyncpg.Pool,
+    terminal_phone: str,
+) -> tuple[str, str | None] | None:
+    """Return one terminal's credential digest and bound IMEI."""
+    _validate_terminal_phone(terminal_phone)
+    async with pool.acquire() as connection:
+        row = await connection.fetchrow(
+            GET_TERMINAL_AUTH_HASH_SQL,
+            terminal_phone,
+        )
+    if row is None:
+        return None
+    return str(row["auth_code_hash"]), row["imei"]
+
+
+async def mark_terminal_authenticated(
+    pool: asyncpg.Pool,
+    terminal_phone: str,
+    imei: str,
+) -> bool:
+    """Record the latest successful JT/T 808 authentication time."""
+    _validate_terminal_phone(terminal_phone)
+    _validate_auth_imei(imei)
+    async with pool.acquire() as connection:
+        value = await connection.fetchval(
+            MARK_TERMINAL_AUTHENTICATED_SQL,
+            terminal_phone,
+            imei,
+        )
+    return value is not None
+
+
 # Compatibility name retained for earlier callers.
 query_track_points = get_track_points
 
@@ -485,3 +803,20 @@ def _as_utc(value: datetime) -> datetime:
 def _validate_imei(imei: str) -> None:
     if not imei or len(imei) > 20 or not imei.isascii() or not imei.isdecimal():
         raise DatabaseValueError("IMEI must contain 1 to 20 ASCII decimal digits")
+
+
+def _validate_terminal_phone(terminal_phone: str) -> None:
+    if (
+        not terminal_phone
+        or len(terminal_phone) > 20
+        or not terminal_phone.isascii()
+        or not terminal_phone.isdecimal()
+    ):
+        raise DatabaseValueError(
+            "terminal_phone must contain 1 to 20 ASCII decimal digits"
+        )
+
+
+def _validate_auth_imei(imei: str) -> None:
+    if len(imei) != 15 or not imei.isascii() or not imei.isdecimal():
+        raise DatabaseValueError("IMEI must contain exactly 15 ASCII decimal digits")

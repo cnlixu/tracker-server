@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+from dataclasses import asdict
 import logging
 from typing import Annotated, Awaitable, TypeVar
 from zoneinfo import ZoneInfo
@@ -19,6 +20,8 @@ from .database import (
     get_device_latest,
     get_devices,
     get_track_points,
+    get_terminal_configuration,
+    update_terminal_configuration,
     update_device_name,
 )
 from .schemas import (
@@ -26,6 +29,8 @@ from .schemas import (
     DeviceResponse,
     HealthResponse,
     OnlineStatus,
+    TerminalConfigurationResponse,
+    TerminalConfigurationUpdate,
     TrackPointResponse,
 )
 
@@ -140,6 +145,46 @@ async def change_device_name(
             detail="device not found",
         )
     return device_to_response(device, now, thresholds)
+
+
+@router.get(
+    "/devices/{imei}/configuration",
+    response_model=TerminalConfigurationResponse,
+)
+async def device_configuration(
+    imei: ImeiPath,
+    _admin: AdminDependency,
+    pool: PoolDependency,
+) -> TerminalConfigurationResponse:
+    config = await _run_database_call(
+        get_terminal_configuration(pool, imei),
+        "get terminal configuration",
+    )
+    if config is None:
+        raise HTTPException(status_code=404, detail="terminal configuration not found")
+    return TerminalConfigurationResponse(**asdict(config))
+
+
+@router.put(
+    "/devices/{imei}/configuration",
+    response_model=TerminalConfigurationResponse,
+)
+async def change_device_configuration(
+    imei: ImeiPath,
+    update: TerminalConfigurationUpdate,
+    _admin: AdminDependency,
+    pool: PoolDependency,
+) -> TerminalConfigurationResponse:
+    changes = update.model_dump(exclude_none=True)
+    if not changes:
+        raise HTTPException(status_code=400, detail="at least one setting is required")
+    config = await _run_database_call(
+        update_terminal_configuration(pool, imei, changes),
+        "update terminal configuration",
+    )
+    if config is None:
+        raise HTTPException(status_code=404, detail="terminal configuration not found")
+    return TerminalConfigurationResponse(**asdict(config))
 
 
 def shanghai_day_to_utc_range(local_date: date) -> tuple[datetime, datetime]:

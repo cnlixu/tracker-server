@@ -12,24 +12,61 @@ from backend.app.jt808_protocol import (
     EXTRA_SIGNAL,
     MSG_LOCATION,
     MSG_PLATFORM_COMMON_ACK,
+    MSG_REGISTER_ACK,
+    MSG_SET_PARAMETERS,
     MSG_TERMINAL_AUTH,
+    MSG_TERMINAL_COMMON_ACK,
+    MSG_TERMINAL_REGISTER,
     build_frame,
     decode_frame,
+    JT808FrameBuffer,
 )
 from backend.app.jt808_tcp_server import ConnectionState, TrackerTCPServer
+from backend.app.models import TerminalConfiguration
 
 
 IMEI = "862288087606784"
+TERMINAL_PHONE = "13800138000"
 AUTH_CODE = "device-secret"
 
 
 class FakeService:
     def __init__(self) -> None:
         self.batches = []
+        self.registrations = []
+        self.credentials = {}
+        self.pending_configuration = None
+        self.confirmations = []
+
+    async def register_terminal(self, registration):
+        self.registrations.append(registration)
+        self.credentials[registration.terminal_phone] = (AUTH_CODE, None)
+        return AUTH_CODE
+
+    async def authenticate_terminal(self, terminal_phone, imei, auth_code):
+        credential = self.credentials.get(terminal_phone)
+        if credential is None:
+            return False
+        expected, bound_imei = credential
+        accepted = auth_code == expected and bound_imei in (None, imei)
+        if accepted:
+            self.credentials[terminal_phone] = (expected, imei)
+        return accepted
 
     async def process_batch(self, batch):
         self.batches.append(batch)
         return len(batch.records)
+
+    async def get_pending_configuration(self, terminal_phone):
+        return self.pending_configuration
+
+    async def mark_configuration_sent(self, terminal_phone, revision):
+        return None
+
+    async def confirm_configuration(
+        self, terminal_phone, revision, success, error=None
+    ):
+        self.confirmations.append((terminal_phone, revision, success, error))
 
 
 class FakeWriter:
@@ -67,37 +104,76 @@ def auth_body() -> bytes:
     return bytes([len(encoded)]) + encoded + IMEI.encode("ascii") + b"1.0".ljust(20, b"\x00")
 
 
+def registration_body() -> bytes:
+    values = (
+        (0x01, b"SP-001"),
+        (0x02, b"ASSET-001"),
+        (0x03, b"JZG043A"),
+        (0x04, IMEI.encode()),
+        (0x05, IMEI.encode()),
+        (0x06, b"89860064221642652497"),
+        (0x07, b"Air780EGP"),
+        (0x08, b"001.999.014"),
+        (0x09, b"ORG-01"),
+        (0x0A, b"202610"),
+        (0x0B, struct.pack(">I", 0)),
+    )
+    items = tuple(bytes([item_id, len(value)]) + value for item_id, value in values)
+    return b"".join((
+        struct.pack(">HH", 51, 5101),
+        b"JZG43".ljust(11, b"\x00"),
+        b"EPTR",
+        struct.pack(">BBIIB", 1, 4, 0x135F, 300, len(items)),
+        *items,
+    ))
+
+
 def test_authentication_is_required_and_ack_follows_persistence() -> None:
     async def scenario() -> None:
         service = FakeService()
-        server = TrackerTCPServer(
-            service,
-            TCPSettings(auth_code=AUTH_CODE),
-        )
+        server = TrackerTCPServer(service, TCPSettings())
         writer = FakeWriter()
         state = ConnectionState()
 
         await server._handle_frame(
-            build_frame(MSG_TERMINAL_AUTH, IMEI, 1, auth_body()),
+            build_frame(MSG_TERMINAL_REGISTER, TERMINAL_PHONE, 7, registration_body()),
+            writer,
+            state,
+            "test",
+        )
+        register_ack = decode_frame(bytes(writer.output))
+        assert register_ack.message_id == MSG_REGISTER_ACK
+        assert register_ack.message_serial == 0
+        assert register_ack.body == struct.pack(">HB", 7, 0) + AUTH_CODE.encode()
+        assert service.registrations[0].terminal_phone == TERMINAL_PHONE
+
+        writer.output.clear()
+        await server._handle_frame(
+            build_frame(MSG_TERMINAL_AUTH, TERMINAL_PHONE, 1, auth_body()),
             writer,
             state,
             "test",
         )
         auth_ack = decode_frame(bytes(writer.output))
         assert auth_ack.message_id == MSG_PLATFORM_COMMON_ACK
+        assert auth_ack.message_serial == 1
         assert auth_ack.body == struct.pack(">HHB", 1, MSG_TERMINAL_AUTH, 0)
         assert state.authenticated is True
+        assert state.terminal_phone == TERMINAL_PHONE
+        assert state.imei == IMEI
 
         writer.output.clear()
         await server._handle_frame(
-            build_frame(MSG_LOCATION, IMEI, 100, location_body()),
+            build_frame(MSG_LOCATION, TERMINAL_PHONE, 100, location_body()),
             writer,
             state,
             "test",
         )
         assert len(service.batches) == 1
+        assert service.batches[0].imei == IMEI
         assert service.batches[0].records[0].battery_percent == 25
         location_ack = decode_frame(bytes(writer.output))
+        assert location_ack.message_serial == 2
         assert location_ack.body == struct.pack(">HHB", 100, MSG_LOCATION, 0)
 
     asyncio.run(scenario())
@@ -106,10 +182,10 @@ def test_authentication_is_required_and_ack_follows_persistence() -> None:
 def test_location_before_authentication_is_rejected() -> None:
     async def scenario() -> None:
         service = FakeService()
-        server = TrackerTCPServer(service, TCPSettings(auth_code=AUTH_CODE))
+        server = TrackerTCPServer(service, TCPSettings())
         writer = FakeWriter()
         await server._handle_frame(
-            build_frame(MSG_LOCATION, IMEI, 100, location_body()),
+            build_frame(MSG_LOCATION, TERMINAL_PHONE, 100, location_body()),
             writer,
             ConnectionState(),
             "test",
@@ -117,5 +193,51 @@ def test_location_before_authentication_is_rejected() -> None:
         assert service.batches == []
         response = decode_frame(bytes(writer.output))
         assert response.body == struct.pack(">HHB", 100, MSG_LOCATION, 1)
+
+    asyncio.run(scenario())
+
+
+def test_pending_configuration_uses_unique_serial_and_requires_matching_ack() -> None:
+    async def scenario() -> None:
+        service = FakeService()
+        service.credentials[TERMINAL_PHONE] = (AUTH_CODE, IMEI)
+        service.pending_configuration = TerminalConfiguration(
+            terminal_phone=TERMINAL_PHONE,
+            revision=7,
+            applied_revision=6,
+            province_id=43,
+            city_id=4301,
+            terminal_type=4,
+            report_interval_sec=900,
+            service_point_id="SP-001",
+            asset_id="ASSET-001",
+            organization_code="ORG-01",
+        )
+        server = TrackerTCPServer(service, TCPSettings())
+        writer = FakeWriter()
+        state = ConnectionState()
+        await server._handle_frame(
+            build_frame(MSG_TERMINAL_AUTH, TERMINAL_PHONE, 9, auth_body()),
+            writer,
+            state,
+            "test",
+        )
+        wires = JT808FrameBuffer().feed(bytes(writer.output))
+        assert len(wires) == 2
+        auth_ack, setting = map(decode_frame, wires)
+        assert auth_ack.message_serial == 0
+        assert setting.message_id == MSG_SET_PARAMETERS
+        assert setting.message_serial == 1
+
+        writer.output.clear()
+        terminal_ack = struct.pack(">HHB", setting.message_serial, MSG_SET_PARAMETERS, 0)
+        await server._handle_frame(
+            build_frame(MSG_TERMINAL_COMMON_ACK, TERMINAL_PHONE, 10, terminal_ack),
+            writer,
+            state,
+            "test",
+        )
+        assert writer.output == b""
+        assert service.confirmations == [(TERMINAL_PHONE, 7, True, None)]
 
     asyncio.run(scenario())

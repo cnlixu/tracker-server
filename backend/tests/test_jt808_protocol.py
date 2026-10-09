@@ -16,18 +16,25 @@ from backend.app.jt808_protocol import (
     MSG_LOCATION,
     MSG_LOCATION_BATCH,
     MSG_PLATFORM_COMMON_ACK,
+    MSG_SET_PARAMETERS,
+    MSG_TERMINAL_REGISTER,
     FrameError,
     JT808FrameBuffer,
     MessageReassembler,
     build_common_response,
     build_frame,
+    build_set_parameters,
+    configuration_parameter_values,
     decode_frame,
     decode_location_message,
+    parse_registration,
 )
+from backend.app.models import TerminalConfiguration
 
 
 IMEI = "862288087606784"
 GENERATION = 0x12345678
+TERMINAL_PHONE = "13800138000"
 
 
 def extra(item_id: int, value: bytes) -> bytes:
@@ -80,6 +87,47 @@ def packaged_frames(message_id: int, serial: int, body: bytes) -> list[bytes]:
         )
         for index, chunk in enumerate(chunks, 1)
     ]
+
+
+def registration_item(item_id: int, value: bytes) -> bytes:
+    return bytes([item_id, len(value)]) + value
+
+
+def test_eptr_registration_fields_are_decoded() -> None:
+    items = (
+        registration_item(0x01, b"SP-001"),
+        registration_item(0x02, "资产-01".encode()),
+        registration_item(0x03, b"JZG043A"),
+        registration_item(0x04, b"SN0001"),
+        registration_item(0x05, IMEI.encode()),
+        registration_item(0x06, b"89860064221642652497"),
+        registration_item(0x07, b"Air780EGP"),
+        registration_item(0x08, b"001.999.014"),
+        registration_item(0x09, b"ORG-01"),
+        registration_item(0x0A, b"202610"),
+        registration_item(0x0B, struct.pack(">I", 3)),
+    )
+    body = b"".join((
+        struct.pack(">HH", 51, 5101),
+        b"JZG43".ljust(11, b"\x00"),
+        b"EPTR",
+        struct.pack(">BBIIB", 1, 4, 0x135F, 300, len(items)),
+        *items,
+    ))
+    frame = decode_frame(build_frame(MSG_TERMINAL_REGISTER, TERMINAL_PHONE, 7, body))
+    registration = parse_registration(frame)
+
+    assert registration.terminal_phone == TERMINAL_PHONE
+    assert registration.province_id == 51
+    assert registration.city_id == 5101
+    assert registration.manufacturer_id == "JZG43"
+    assert registration.terminal_model == "JZG043A"
+    assert registration.terminal_sn == "SN0001"
+    assert registration.imei == IMEI
+    assert registration.iccid == "89860064221642652497"
+    assert registration.report_interval_sec == 300
+    assert registration.profile_revision == 3
+    assert registration.asset_id == "资产-01"
 
 
 def test_single_location_decodes_standard_and_custom_fields() -> None:
@@ -139,6 +187,37 @@ def test_512_record_batch_is_standard_subpackaged_and_reassembled() -> None:
 
 def test_platform_common_response_echoes_terminal_serial_and_message_id() -> None:
     terminal = decode_frame(build_frame(MSG_LOCATION, IMEI, 321, location_body()))
-    response = decode_frame(build_common_response(terminal))
+    response = decode_frame(build_common_response(terminal, 77))
     assert response.message_id == MSG_PLATFORM_COMMON_ACK
+    assert response.message_serial == 77
     assert response.body == struct.pack(">HHB", 321, MSG_LOCATION, 0)
+
+
+def test_set_parameters_contains_complete_versioned_profile() -> None:
+    config = TerminalConfiguration(
+        terminal_phone=TERMINAL_PHONE,
+        revision=9,
+        applied_revision=8,
+        province_id=43,
+        city_id=4301,
+        terminal_type=4,
+        report_interval_sec=900,
+        service_point_id="SP-001",
+        asset_id="资产-001",
+        organization_code="ORG-01",
+    )
+    frame = decode_frame(build_set_parameters(config, 0x2345))
+    assert frame.message_id == MSG_SET_PARAMETERS
+    assert frame.message_serial == 0x2345
+    expected = configuration_parameter_values(config)
+    count = frame.body[0]
+    offset = 1
+    actual = {}
+    for _ in range(count):
+        parameter_id = int.from_bytes(frame.body[offset : offset + 4], "big")
+        length = frame.body[offset + 4]
+        offset += 5
+        actual[parameter_id] = frame.body[offset : offset + length]
+        offset += length
+    assert offset == len(frame.body)
+    assert actual == expected
