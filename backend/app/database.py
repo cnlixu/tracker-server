@@ -10,7 +10,12 @@ from pathlib import Path
 import asyncpg
 
 from .config import DatabaseSettings, load_database_settings
-from .models import TerminalConfiguration, TerminalRegistration, TrackerRecord
+from .models import (
+    TerminalAttributes,
+    TerminalConfiguration,
+    TerminalRegistration,
+    TrackerRecord,
+)
 
 
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "sql" / "schema.sql"
@@ -19,13 +24,13 @@ INSERT_POSITION_RECORD_SQL = """
 INSERT INTO track_points (
     imei, gps_time, valid, latitude, longitude, altitude, speed, course,
     satellites, hdop, csq, wake_code, raw_data,
-    generation_id, record_seq, batch_id, battery_mv, battery_percent, time_valid
+    record_fingerprint, batch_id, battery_mv, battery_percent, time_valid
 )
 VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-    $17, $18, $19
+    $17, $18
 )
-ON CONFLICT (imei, generation_id, record_seq) DO NOTHING
+ON CONFLICT (imei, record_fingerprint) DO NOTHING
 RETURNING id
 """
 
@@ -37,17 +42,17 @@ WITH inserted AS (
     INSERT INTO track_points (
         imei, gps_time, valid, latitude, longitude, altitude, speed, course,
         satellites, hdop, csq, wake_code, raw_data,
-        generation_id, record_seq, batch_id, battery_mv, battery_percent, time_valid
+        record_fingerprint, batch_id, battery_mv, battery_percent, time_valid
     )
     SELECT *
     FROM UNNEST(
         $1::TEXT[], $2::TIMESTAMPTZ[], $3::BOOLEAN[], $4::DOUBLE PRECISION[],
         $5::DOUBLE PRECISION[], $6::REAL[], $7::REAL[], $8::REAL[],
         $9::SMALLINT[], $10::REAL[], $11::SMALLINT[], $12::SMALLINT[],
-        $13::TEXT[], $14::BIGINT[], $15::BIGINT[], $16::BIGINT[],
-        $17::INTEGER[], $18::SMALLINT[], $19::BOOLEAN[]
+        $13::TEXT[], $14::TEXT[], $15::BIGINT[], $16::INTEGER[],
+        $17::SMALLINT[], $18::BOOLEAN[]
     )
-    ON CONFLICT (imei, generation_id, record_seq) DO NOTHING
+    ON CONFLICT (imei, record_fingerprint) DO NOTHING
     RETURNING 1
 )
 SELECT COUNT(*) FROM inserted
@@ -159,40 +164,22 @@ LIMIT $4
 
 UPSERT_TERMINAL_REGISTRATION_SQL = """
 INSERT INTO jt808_terminals (
-    terminal_phone, imei, auth_code_hash, province_id, city_id,
-    manufacturer_id, terminal_model, terminal_id, plate_color, plate_number,
-    profile_magic, profile_version, terminal_type, capabilities,
-    report_interval_sec, service_point_id, asset_id, terminal_sn, iccid,
-    hardware_version, software_version, organization_code, production_batch,
-    profile_revision,
+    terminal_phone, auth_code_hash, province_id, city_id, manufacturer_id,
+    terminal_model, terminal_id, plate_color, plate_number,
     registered_at, last_registered_at
 )
 VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, 0, '', $9, $10, $11, $12,
-    $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, NOW(), NOW()
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW()
 )
 ON CONFLICT (terminal_phone) DO UPDATE SET
     auth_code_hash = EXCLUDED.auth_code_hash,
-    imei = EXCLUDED.imei,
     province_id = EXCLUDED.province_id,
     city_id = EXCLUDED.city_id,
     manufacturer_id = EXCLUDED.manufacturer_id,
     terminal_model = EXCLUDED.terminal_model,
     terminal_id = EXCLUDED.terminal_id,
-    profile_magic = EXCLUDED.profile_magic,
-    profile_version = EXCLUDED.profile_version,
-    terminal_type = EXCLUDED.terminal_type,
-    capabilities = EXCLUDED.capabilities,
-    report_interval_sec = EXCLUDED.report_interval_sec,
-    service_point_id = EXCLUDED.service_point_id,
-    asset_id = EXCLUDED.asset_id,
-    terminal_sn = EXCLUDED.terminal_sn,
-    iccid = EXCLUDED.iccid,
-    hardware_version = EXCLUDED.hardware_version,
-    software_version = EXCLUDED.software_version,
-    organization_code = EXCLUDED.organization_code,
-    production_batch = EXCLUDED.production_batch,
-    profile_revision = EXCLUDED.profile_revision,
+    plate_color = EXCLUDED.plate_color,
+    plate_number = EXCLUDED.plate_number,
     last_registered_at = NOW()
 """
 
@@ -201,25 +188,24 @@ INSERT INTO jt808_terminal_configs (
     terminal_phone, desired_revision, applied_revision,
     desired_parameters, applied_parameters, status, last_applied_at
 )
-VALUES ($1, $2, $2, $3::JSONB, $3::JSONB, 'applied', NOW())
+VALUES ($1, 0, 0, $2::JSONB, $2::JSONB, 'applied', NOW())
 ON CONFLICT (terminal_phone) DO NOTHING
 """
 
-RECONCILE_REGISTERED_TERMINAL_CONFIG_SQL = """
-UPDATE jt808_terminal_configs
-SET desired_revision = CASE
-        WHEN $2 > desired_revision
-          OR ($2 = desired_revision AND desired_parameters <> $3::JSONB)
-        THEN $2 + 1 ELSE desired_revision END,
-    applied_revision = $2,
-    applied_parameters = $3::JSONB,
-    status = CASE
-        WHEN $2 = desired_revision AND desired_parameters = $3::JSONB
-        THEN 'applied' ELSE 'pending' END,
-    last_error = NULL,
-    last_applied_at = NOW(),
-    updated_at = NOW()
+UPDATE_TERMINAL_ATTRIBUTES_SQL = """
+UPDATE jt808_terminals
+SET terminal_type = $2,
+    attribute_manufacturer_id = $3,
+    attribute_terminal_model = $4,
+    attribute_terminal_id = $5,
+    iccid = $6,
+    hardware_version = $7,
+    software_version = $8,
+    gnss_attributes = $9,
+    communication_attributes = $10,
+    attributes_updated_at = NOW()
 WHERE terminal_phone = $1
+RETURNING terminal_phone
 """
 
 GET_PENDING_TERMINAL_CONFIG_SQL = """
@@ -256,11 +242,11 @@ WHERE t.imei = $1
 
 GET_TERMINAL_REGISTRATION_BY_IMEI_SQL = """
 SELECT terminal_phone, imei, province_id, city_id, manufacturer_id,
-       profile_magic, profile_version, terminal_type, capabilities,
-       report_interval_sec, service_point_id, asset_id, terminal_model,
-       terminal_sn, iccid, hardware_version, software_version,
-       organization_code, production_batch, profile_revision,
-       registered_at, last_registered_at, last_authenticated_at
+       terminal_model, terminal_id, plate_color, plate_number,
+       terminal_type, attribute_manufacturer_id, attribute_terminal_model,
+       attribute_terminal_id, iccid, hardware_version, software_version,
+       gnss_attributes, communication_attributes, registered_at,
+       last_registered_at, last_authenticated_at, attributes_updated_at
 FROM jt808_terminals
 WHERE imei = $1
 """
@@ -279,7 +265,6 @@ RETURNING c.terminal_phone, c.desired_revision, c.applied_revision,
 GET_TERMINAL_AUTH_HASH_SQL = """
 SELECT t.auth_code_hash, t.imei
 FROM jt808_terminals t
-JOIN jt808_terminal_configs c ON c.terminal_phone = t.terminal_phone
 WHERE t.terminal_phone = $1
 """
 
@@ -352,31 +337,30 @@ class TrackPoint:
 
 @dataclass(frozen=True, slots=True)
 class TerminalRegistrationSnapshot:
-    """Persisted EPTR registration profile without credential material."""
+    """Standard registration plus the latest standard terminal attributes."""
 
     terminal_phone: str
     imei: str
     province_id: int
     city_id: int
     manufacturer_id: str
-    profile_magic: str
-    profile_version: int
-    terminal_type: int
-    capabilities: int
-    report_interval_sec: int
-    service_point_id: str
-    asset_id: str
     terminal_model: str
-    terminal_sn: str
+    terminal_id: str
+    plate_color: int
+    plate_number: str
+    terminal_type: int
+    attribute_manufacturer_id: str
+    attribute_terminal_model: str
+    attribute_terminal_id: str
     iccid: str
     hardware_version: str
     software_version: str
-    organization_code: str
-    production_batch: str
-    profile_revision: int
+    gnss_attributes: int
+    communication_attributes: int
     registered_at: datetime
     last_registered_at: datetime
     last_authenticated_at: datetime | None
+    attributes_updated_at: datetime | None
 
 
 async def init_pool(settings: DatabaseSettings | None = None) -> asyncpg.Pool:
@@ -430,7 +414,6 @@ initialize_schema = init_schema
 
 def record_to_track_point_params(
     imei: str,
-    generation_id: int,
     batch_id: int,
     record: TrackerRecord,
 ) -> tuple[object, ...]:
@@ -452,8 +435,7 @@ def record_to_track_point_params(
         record.csq,
         record.wake_code,
         record.raw_data,
-        generation_id,
-        record.sequence,
+        record.record_fingerprint,
         batch_id,
         record.battery_mv,
         record.battery_percent,
@@ -487,13 +469,12 @@ def record_to_device_params(
 
 def records_to_bulk_params(
     imei: str,
-    generation_id: int,
     batch_id: int,
     records: tuple[TrackerRecord, ...] | list[TrackerRecord],
 ) -> tuple[object, ...]:
     """Transpose validated records into PostgreSQL arrays for one UNNEST."""
     rows = [
-        record_to_track_point_params(imei, generation_id, batch_id, record)
+        record_to_track_point_params(imei, batch_id, record)
         for record in records
     ]
     if not rows:
@@ -505,27 +486,23 @@ async def save_records(
     pool: asyncpg.Pool,
     *,
     imei: str,
-    generation_id: int,
     batch_id: int,
     records: tuple[TrackerRecord, ...] | list[TrackerRecord],
 ) -> int:
     """Store records and the device snapshot atomically, idempotently.
 
-    Each record is keyed by ``(imei, generation_id, record_seq)``, so a batch
-    that the device re-sends after a lost acknowledgement only stores what is
-    still missing. The returned count is the number of newly inserted records;
-    an entirely duplicated batch returns ``0``.
+    The terminal sends only standard location content. The test server hashes
+    that content and keys records by ``(imei, record_fingerprint)`` so an ACK
+    loss does not duplicate an identical retransmission. This is a local test
+    implementation detail, not a field required from the formal platform.
     """
     if not records:
         raise DatabaseValueError("records must not be empty")
     _validate_imei(imei)
-    if any(record.generation_id not in (None, generation_id) for record in records):
-        raise DatabaseValueError("record generation does not match batch generation")
-    ordered = sorted(records, key=lambda record: record.sequence)
+    ordered = sorted(records, key=lambda record: (record.gps_time, record.raw_data))
 
     bulk_params = records_to_bulk_params(
         imei,
-        generation_id,
         batch_id,
         ordered,
     )
@@ -618,46 +595,49 @@ async def save_terminal_registration(
         character not in "0123456789abcdef" for character in auth_code_hash
     ):
         raise DatabaseValueError("auth_code_hash must be a lowercase SHA-256 digest")
-    parameters = _registration_parameters(registration)
+    parameters = {"report_interval_sec": 300}
     async with pool.acquire() as connection:
         async with connection.transaction():
             await connection.execute(
                 UPSERT_TERMINAL_REGISTRATION_SQL,
                 registration.terminal_phone,
-                registration.imei,
                 auth_code_hash,
                 registration.province_id,
                 registration.city_id,
                 registration.manufacturer_id,
                 registration.terminal_model,
-                registration.terminal_sn,
-                registration.profile_magic,
-                registration.profile_version,
-                registration.terminal_type,
-                registration.capabilities,
-                registration.report_interval_sec,
-                registration.service_point_id,
-                registration.asset_id,
-                registration.terminal_sn,
-                registration.iccid,
-                registration.hardware_version,
-                registration.software_version,
-                registration.organization_code,
-                registration.production_batch,
-                registration.profile_revision,
+                registration.terminal_id,
+                registration.plate_color,
+                registration.plate_number,
             )
             await connection.execute(
                 INSERT_INITIAL_TERMINAL_CONFIG_SQL,
                 registration.terminal_phone,
-                registration.profile_revision,
                 json.dumps(parameters, ensure_ascii=False),
             )
-            await connection.execute(
-                RECONCILE_REGISTERED_TERMINAL_CONFIG_SQL,
-                registration.terminal_phone,
-                registration.profile_revision,
-                json.dumps(parameters, ensure_ascii=False),
-            )
+
+
+async def save_terminal_attributes(
+    pool: asyncpg.Pool,
+    attributes: TerminalAttributes,
+) -> bool:
+    """Persist one authenticated terminal's standard 0x0107 attributes."""
+    _validate_terminal_phone(attributes.terminal_phone)
+    async with pool.acquire() as connection:
+        value = await connection.fetchval(
+            UPDATE_TERMINAL_ATTRIBUTES_SQL,
+            attributes.terminal_phone,
+            attributes.terminal_type,
+            attributes.manufacturer_id,
+            attributes.terminal_model,
+            attributes.terminal_id,
+            attributes.iccid,
+            attributes.hardware_version,
+            attributes.software_version,
+            attributes.gnss_attributes,
+            attributes.communication_attributes,
+        )
+    return value is not None
 
 
 async def get_pending_terminal_configuration(
@@ -712,7 +692,7 @@ async def get_terminal_registration(
     pool: asyncpg.Pool,
     imei: str,
 ) -> TerminalRegistrationSnapshot | None:
-    """Return the latest EPTR registration profile for one device."""
+    """Return standard registration and terminal attributes for one device."""
     _validate_auth_imei(imei)
     async with pool.acquire() as connection:
         row = await connection.fetchrow(GET_TERMINAL_REGISTRATION_BY_IMEI_SQL, imei)
@@ -725,31 +705,23 @@ async def update_terminal_configuration(
     changes: dict[str, object],
 ) -> TerminalConfiguration | None:
     _validate_auth_imei(imei)
+    if set(changes) != {"report_interval_sec"}:
+        raise DatabaseValueError("only report_interval_sec is configurable")
+    interval = changes["report_interval_sec"]
+    if not isinstance(interval, int) or not 5 <= interval <= 86400:
+        raise DatabaseValueError("report_interval_sec must be between 5 and 86400")
     async with pool.acquire() as connection:
         async with connection.transaction():
             row = await connection.fetchrow(GET_TERMINAL_CONFIG_BY_IMEI_SQL, imei)
             if row is None:
                 return None
-            parameters = _decode_json_parameters(row["desired_parameters"])
-            parameters.update(changes)
+            parameters = {"report_interval_sec": interval}
             row = await connection.fetchrow(
                 UPDATE_TERMINAL_CONFIG_SQL,
                 imei,
                 json.dumps(parameters, ensure_ascii=False),
             )
     return _terminal_configuration_from_row(row)
-
-
-def _registration_parameters(registration: TerminalRegistration) -> dict[str, object]:
-    return {
-        "province_id": registration.province_id,
-        "city_id": registration.city_id,
-        "terminal_type": registration.terminal_type,
-        "report_interval_sec": registration.report_interval_sec,
-        "service_point_id": registration.service_point_id,
-        "asset_id": registration.asset_id,
-        "organization_code": registration.organization_code,
-    }
 
 
 def _terminal_configuration_from_row(row: object) -> TerminalConfiguration | None:
@@ -761,13 +733,7 @@ def _terminal_configuration_from_row(row: object) -> TerminalConfiguration | Non
         revision=int(row["desired_revision"]),
         applied_revision=int(row["applied_revision"]),
         status=str(row["status"]),
-        province_id=int(parameters["province_id"]),
-        city_id=int(parameters["city_id"]),
-        terminal_type=int(parameters["terminal_type"]),
         report_interval_sec=int(parameters["report_interval_sec"]),
-        service_point_id=str(parameters.get("service_point_id", "")),
-        asset_id=str(parameters.get("asset_id", "")),
-        organization_code=str(parameters.get("organization_code", "")),
     )
 
 
@@ -821,14 +787,13 @@ query_track_points = get_track_points
 async def _insert_position_record(
     connection: asyncpg.Connection,
     imei: str,
-    generation_id: int,
     batch_id: int,
     record: TrackerRecord,
 ) -> bool:
     """Insert one record; return ``False`` when it was already stored."""
     row_id = await connection.fetchval(
         INSERT_POSITION_RECORD_SQL,
-        *record_to_track_point_params(imei, generation_id, batch_id, record),
+        *record_to_track_point_params(imei, batch_id, record),
     )
     # ON CONFLICT DO NOTHING returns no row for an already stored record.
     return row_id is not None

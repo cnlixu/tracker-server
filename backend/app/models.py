@@ -8,43 +8,41 @@ from datetime import datetime
 
 @dataclass(frozen=True, slots=True)
 class TerminalRegistration:
-    """Validated JT/T 808 terminal registration fields."""
+    """Standard JT/T 808-2019 terminal registration fields."""
 
     terminal_phone: str
     province_id: int
     city_id: int
     manufacturer_id: str
-    profile_magic: str
-    profile_version: int
-    terminal_type: int
-    capabilities: int
-    report_interval_sec: int
-    service_point_id: str
-    asset_id: str
     terminal_model: str
-    terminal_sn: str
-    imei: str
+    terminal_id: str
+    plate_color: int
+    plate_number: str
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalAttributes:
+    """Standard 0x0107 terminal attribute response fields."""
+
+    terminal_phone: str
+    terminal_type: int
+    manufacturer_id: str
+    terminal_model: str
+    terminal_id: str
     iccid: str
     hardware_version: str
     software_version: str
-    organization_code: str
-    production_batch: str
-    profile_revision: int
+    gnss_attributes: int
+    communication_attributes: int
 
 
 @dataclass(frozen=True, slots=True)
 class TerminalConfiguration:
-    """One complete mutable EPTR parameter set distributed with 0x8103."""
+    """The only remotely configurable tracker parameter: report interval."""
 
     terminal_phone: str
     revision: int
-    province_id: int
-    city_id: int
-    terminal_type: int
     report_interval_sec: int
-    service_point_id: str
-    asset_id: str
-    organization_code: str
     status: str = "pending"
     applied_revision: int = 0
 
@@ -53,9 +51,8 @@ class TerminalConfiguration:
 class TrackerRecord:
     """One decoded JT/T 808 location record."""
 
-    sequence: int
     gps_time: datetime
-    time_valid: bool
+    time_valid: bool | None
     valid: bool
     latitude: float | None
     longitude: float | None
@@ -68,5 +65,5 @@ class TrackerRecord:
     battery_mv: int | None
     wake_code: int
     raw_data: str
+    record_fingerprint: str
     battery_percent: int | None = None
-    generation_id: int | None = None

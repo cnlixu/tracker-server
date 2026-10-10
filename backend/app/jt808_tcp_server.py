@@ -13,11 +13,13 @@ from .config import TCPSettings, load_tcp_settings
 from .database import close_pool, init_pool
 from .jt808_protocol import (
     MSG_TERMINAL_COMMON_ACK,
+    MSG_TERMINAL_HEARTBEAT,
     MSG_TERMINAL_PARAMETERS,
     MSG_LOCATION,
     MSG_LOCATION_BATCH,
     MSG_SET_PARAMETERS,
     MSG_TERMINAL_AUTH,
+    MSG_TERMINAL_ATTRIBUTES,
     MSG_TERMINAL_REGISTER,
     FrameError,
     JT808Frame,
@@ -31,11 +33,12 @@ from .jt808_protocol import (
     decode_frame,
     decode_location_message,
     parse_authentication,
+    parse_terminal_attributes,
     parse_registration,
     parse_terminal_common_response,
     parse_terminal_parameter_response,
 )
-from .models import TerminalConfiguration, TerminalRegistration
+from .models import TerminalAttributes, TerminalConfiguration, TerminalRegistration
 from .services import TrackerService
 
 
@@ -57,6 +60,9 @@ class ReportService(Protocol):
 
     async def process_batch(self, batch: TrackerBatch) -> int:
         """Persist one decoded location message atomically."""
+
+    async def store_terminal_attributes(self, attributes: TerminalAttributes) -> bool:
+        """Persist one standard 0x0107 terminal attribute response."""
 
     async def get_pending_configuration(
         self, terminal_phone: str
@@ -222,11 +228,27 @@ class TrackerTCPServer:
         if frame.message_id == MSG_TERMINAL_COMMON_ACK:
             await self._handle_terminal_common_response(frame, state, peer)
             return
+        if frame.message_id == MSG_TERMINAL_HEARTBEAT:
+            await _write(
+                writer,
+                build_common_response(
+                    frame,
+                    self._allocate_platform_serial(),
+                    result=0 if not frame.body else 2,
+                ),
+            )
+            return
         if frame.message_id == MSG_TERMINAL_PARAMETERS:
             try:
                 response = parse_terminal_parameter_response(frame)
             except MessageError as exc:
                 LOGGER.warning("invalid parameter response client=%s error=%s", peer, exc)
+                await _write(
+                    writer,
+                    build_common_response(
+                        frame, self._allocate_platform_serial(), result=2
+                    ),
+                )
             else:
                 LOGGER.info(
                     "terminal parameters client=%s response_serial=%s count=%s",
@@ -234,6 +256,15 @@ class TrackerTCPServer:
                     response.response_serial,
                     len(response.parameters),
                 )
+                await _write(
+                    writer,
+                    build_common_response(
+                        frame, self._allocate_platform_serial(), result=0
+                    ),
+                )
+            return
+        if frame.message_id == MSG_TERMINAL_ATTRIBUTES:
+            await self._handle_terminal_attributes(frame, writer, peer)
             return
         if frame.message_id not in (MSG_LOCATION, MSG_LOCATION_BATCH):
             LOGGER.warning(
@@ -268,10 +299,9 @@ class TrackerTCPServer:
             raise
         except Exception:
             LOGGER.exception(
-                "location persistence failed client=%s imei=%s generation=%s batch=%s",
+                "location persistence failed client=%s imei=%s batch=%s",
                 peer,
                 batch.imei,
-                batch.generation_id,
                 batch.batch_id,
             )
             await _write(
@@ -325,10 +355,10 @@ class TrackerTCPServer:
             )
             return
         LOGGER.info(
-            "terminal registered client=%s terminal=%s terminal_sn=%s",
+            "terminal registered client=%s terminal=%s terminal_id=%s",
             peer,
             frame.terminal_phone,
-            registration.terminal_sn,
+            registration.terminal_id,
         )
         await _write(
             writer,
@@ -391,6 +421,43 @@ class TrackerTCPServer:
         )
         if accepted:
             await self._send_pending_configuration(writer, state, peer)
+
+    async def _handle_terminal_attributes(
+        self,
+        frame: JT808Frame,
+        writer: asyncio.StreamWriter,
+        peer: str,
+    ) -> None:
+        try:
+            attributes = parse_terminal_attributes(frame)
+            stored = await self.service.store_terminal_attributes(attributes)
+        except (MessageError, UnicodeError) as exc:
+            LOGGER.warning("invalid terminal attributes client=%s error=%s", peer, exc)
+            await _write(
+                writer,
+                build_common_response(
+                    frame, self._allocate_platform_serial(), result=2
+                ),
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("terminal attributes persistence failed client=%s", peer)
+            stored = False
+        LOGGER.info(
+            "terminal attributes client=%s terminal=%s terminal_id=%s stored=%s",
+            peer,
+            frame.terminal_phone,
+            attributes.terminal_id,
+            stored,
+        )
+        await _write(
+            writer,
+            build_common_response(
+                frame, self._allocate_platform_serial(), result=0 if stored else 1
+            ),
+        )
 
     async def _send_pending_configuration(
         self,

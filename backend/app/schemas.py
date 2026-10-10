@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, Field
 
 
 OnlineStatus = Literal["online", "warning", "offline"]
@@ -38,27 +38,9 @@ class DeviceNameUpdate(BaseModel):
 
 
 class TerminalConfigurationUpdate(BaseModel):
-    """Mutable EPTR fields; omitted values retain their current setting."""
+    """The only supported 0x8103 setting: parameter 0x0029."""
 
-    province_id: int | None = Field(default=None, ge=0, le=65535)
-    city_id: int | None = Field(default=None, ge=0, le=65535)
-    terminal_type: int | None = Field(default=None, ge=1, le=255)
     report_interval_sec: int | None = Field(default=None, ge=5, le=86400)
-    service_point_id: str | None = Field(default=None, max_length=32)
-    asset_id: str | None = Field(default=None, max_length=64)
-    organization_code: str | None = Field(default=None, max_length=32)
-
-    @field_validator("service_point_id", "asset_id", "organization_code")
-    @classmethod
-    def validate_wire_length(
-        cls, value: str | None, info: ValidationInfo
-    ) -> str | None:
-        if value is None:
-            return None
-        limits = {"service_point_id": 32, "asset_id": 64, "organization_code": 32}
-        if len(value.encode("utf-8")) > limits[info.field_name]:
-            raise ValueError(f"{info.field_name} exceeds its UTF-8 wire length")
-        return value
 
 
 class TerminalConfigurationResponse(BaseModel):
@@ -66,41 +48,34 @@ class TerminalConfigurationResponse(BaseModel):
     revision: int
     applied_revision: int
     status: Literal["pending", "sent", "applied", "failed"]
-    province_id: int
-    city_id: int
-    terminal_type: int
     report_interval_sec: int
-    service_point_id: str
-    asset_id: str
-    organization_code: str
 
 
 class TerminalRegistrationResponse(BaseModel):
-    """Read-only EPTR registration profile; authentication secrets are excluded."""
+    """Standard registration and 0x0107 attributes without credentials."""
 
     terminal_phone: str
     imei: str
     province_id: int
     city_id: int
     manufacturer_id: str
-    profile_magic: str
-    profile_version: int
-    terminal_type: int
-    capabilities: int
-    report_interval_sec: int
-    service_point_id: str
-    asset_id: str
     terminal_model: str
-    terminal_sn: str
+    terminal_id: str
+    plate_color: int
+    plate_number: str
+    terminal_type: int
+    attribute_manufacturer_id: str
+    attribute_terminal_model: str
+    attribute_terminal_id: str
     iccid: str
     hardware_version: str
     software_version: str
-    organization_code: str
-    production_batch: str
-    profile_revision: int
+    gnss_attributes: int
+    communication_attributes: int
     registered_at: datetime
     last_registered_at: datetime
     last_authenticated_at: datetime | None
+    attributes_updated_at: datetime | None
 
 
 class DeviceResponse(BaseModel):

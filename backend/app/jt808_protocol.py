@@ -1,17 +1,24 @@
 """JT/T 808-2019 codec for the trimmed power-tracker profile.
 
-Supported terminal messages are registration (0x0100), authentication
-(0x0102), parameter response (0x0104), terminal common response (0x0001),
-one location (0x0200), and batched blind-area locations (0x0704). The
-platform also supports parameter setting/query (0x8103/0x8104/0x8106).
+Supported terminal messages are standard registration (0x0100), authentication
+(0x0102), heartbeat (0x0002), terminal attributes (0x0107), parameter response
+(0x0104), terminal common response (0x0001), one location (0x0200), and batched
+blind-area locations (0x0704). The test platform currently configures only
+standard parameter 0x0029 through 0x8103.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+import hashlib
 
-from .models import TerminalConfiguration, TerminalRegistration, TrackerRecord
+from .models import (
+    TerminalAttributes,
+    TerminalConfiguration,
+    TerminalRegistration,
+    TrackerRecord,
+)
 
 
 FLAG = 0x7E
@@ -24,7 +31,9 @@ MAX_BATCH_RECORDS = 512
 
 MSG_TERMINAL_REGISTER = 0x0100
 MSG_TERMINAL_AUTH = 0x0102
+MSG_TERMINAL_ATTRIBUTES = 0x0107
 MSG_TERMINAL_COMMON_ACK = 0x0001
+MSG_TERMINAL_HEARTBEAT = 0x0002
 MSG_TERMINAL_PARAMETERS = 0x0104
 MSG_LOCATION = 0x0200
 MSG_LOCATION_BATCH = 0x0704
@@ -33,33 +42,12 @@ MSG_REGISTER_ACK = 0x8100
 MSG_SET_PARAMETERS = 0x8103
 MSG_QUERY_ALL_PARAMETERS = 0x8104
 MSG_QUERY_PARAMETERS = 0x8106
-
-EPTR_MAGIC = b"EPTR"
-EPTR_PROFILE_VERSION = 1
-REG_TLV_SERVICE_POINT = 0x01
-REG_TLV_ASSET_ID = 0x02
-REG_TLV_TERMINAL_MODEL = 0x03
-REG_TLV_TERMINAL_SN = 0x04
-REG_TLV_IMEI = 0x05
-REG_TLV_ICCID = 0x06
-REG_TLV_HARDWARE_VERSION = 0x07
-REG_TLV_SOFTWARE_VERSION = 0x08
-REG_TLV_ORGANIZATION = 0x09
-REG_TLV_PRODUCTION_BATCH = 0x0A
-REG_TLV_PROFILE_REVISION = 0x0B
+MSG_QUERY_TERMINAL_ATTRIBUTES = 0x8107
 
 PARAM_REPORT_INTERVAL = 0x00000029
-PARAM_PROFILE_REVISION = 0x0000F100
-PARAM_PROVINCE_ID = 0x0000F101
-PARAM_CITY_ID = 0x0000F102
-PARAM_TERMINAL_TYPE = 0x0000F103
-PARAM_SERVICE_POINT = 0x0000F104
-PARAM_ASSET_ID = 0x0000F105
-PARAM_ORGANIZATION = 0x0000F106
 
 EXTRA_SIGNAL = 0x30
 EXTRA_SATELLITES = 0x31
-EXTRA_RECORD_ID = 0xE0
 EXTRA_BATTERY = 0xE1
 EXTRA_HDOP = 0xE2
 
@@ -90,7 +78,6 @@ class JT808Frame:
 @dataclass(frozen=True, slots=True)
 class TrackerBatch:
     imei: str
-    generation_id: int
     batch_id: int
     records: tuple[TrackerRecord, ...]
     message_id: int
@@ -302,102 +289,72 @@ class MessageReassembler:
 
 def _decode_registration_text(value: bytes, field_name: str) -> str:
     try:
-        return value.rstrip(b"\x00").decode("utf-8")
+        # Standard fixed BYTE fields may be padded on either side depending on
+        # the field definition (notably, the 0x0100 model is left padded).
+        return value.strip(b"\x00").decode("ascii")
     except UnicodeDecodeError as exc:
         raise MessageError(
-            f"terminal registration {field_name} is not valid UTF-8"
+            f"terminal {field_name} is not valid ASCII"
         ) from exc
 
 
 def parse_registration(frame: JT808Frame) -> TerminalRegistration:
-    if frame.message_id != MSG_TERMINAL_REGISTER or len(frame.body) < 30:
+    """Decode the fixed JT/T 808-2019 0x0100 body without project extensions."""
+    if frame.message_id != MSG_TERMINAL_REGISTER or len(frame.body) < 76:
         raise MessageError("invalid terminal registration body")
     body = frame.body
-    if body[15:19] != EPTR_MAGIC:
-        raise MessageError("terminal registration is not the EPTR profile")
-    profile_version = body[19]
-    if profile_version != EPTR_PROFILE_VERSION:
-        raise MessageError("unsupported EPTR registration profile version")
-    tlv_count = body[29]
-    values: dict[int, bytes] = {}
-    offset = 30
-    for _ in range(tlv_count):
-        if offset + 2 > len(body):
-            raise MessageError("truncated EPTR registration item")
-        item_id, length = body[offset], body[offset + 1]
-        offset += 2
-        if item_id in values or offset + length > len(body):
-            raise MessageError("invalid EPTR registration item")
-        values[item_id] = body[offset : offset + length]
-        offset += length
-    if offset != len(body):
-        raise MessageError("trailing bytes after EPTR registration")
-
-    def text(
-        item_id: int,
-        name: str,
-        *,
-        required: bool = False,
-        max_bytes: int = 255,
-    ) -> str:
-        raw = values.get(item_id, b"")
-        if len(raw) > max_bytes:
-            raise MessageError(f"terminal registration {name} is too long")
-        value = _decode_registration_text(raw, name)
-        if required and not value:
-            raise MessageError(f"terminal registration {name} is required")
-        return value
-
-    imei = text(REG_TLV_IMEI, "IMEI", required=True)
-    iccid = text(REG_TLV_ICCID, "ICCID", required=True)
-    if len(imei) != 15 or not imei.isascii() or not imei.isdecimal():
-        raise MessageError("terminal registration IMEI is invalid")
-    if not 18 <= len(iccid) <= 22 or not iccid.isascii() or not iccid.isdecimal():
-        raise MessageError("terminal registration ICCID is invalid")
-    terminal_type = body[20]
-    report_interval = int.from_bytes(body[25:29], "big")
-    if terminal_type == 0:
-        raise MessageError("terminal registration type is invalid")
-    if not 5 <= report_interval <= 86400:
-        raise MessageError("terminal registration report interval is invalid")
-    revision_raw = values.get(REG_TLV_PROFILE_REVISION, b"\x00\x00\x00\x00")
-    if len(revision_raw) != 4:
-        raise MessageError("terminal registration profile revision is invalid")
+    try:
+        plate_number = body[76:].decode("gbk")
+    except UnicodeDecodeError as exc:
+        raise MessageError("terminal registration plate number is not valid GBK") from exc
     return TerminalRegistration(
         terminal_phone=frame.terminal_phone,
         province_id=int.from_bytes(body[0:2], "big"),
         city_id=int.from_bytes(body[2:4], "big"),
         manufacturer_id=_decode_registration_text(body[4:15], "manufacturer ID"),
-        profile_magic="EPTR",
-        profile_version=profile_version,
-        terminal_type=terminal_type,
-        capabilities=int.from_bytes(body[21:25], "big"),
-        report_interval_sec=report_interval,
-        service_point_id=text(
-            REG_TLV_SERVICE_POINT, "service point ID", max_bytes=32
+        terminal_model=_decode_registration_text(body[15:45], "terminal model"),
+        terminal_id=_decode_registration_text(body[45:75], "terminal ID"),
+        plate_color=body[75],
+        plate_number=plate_number,
+    )
+
+
+def _digits_from_bcd(value: bytes, field_name: str) -> str:
+    text = "".join(f"{byte:02X}" for byte in value)
+    if not text.isdecimal():
+        raise MessageError(f"{field_name} contains non-decimal BCD")
+    return text
+
+
+def parse_terminal_attributes(frame: JT808Frame) -> TerminalAttributes:
+    """Decode the standard JT/T 808-2019 0x0107 response body."""
+    if frame.message_id != MSG_TERMINAL_ATTRIBUTES or len(frame.body) < 81:
+        raise MessageError("invalid terminal attributes body")
+    body = frame.body
+    hardware_length = body[77]
+    hardware_end = 78 + hardware_length
+    if hardware_end >= len(body):
+        raise MessageError("truncated terminal hardware version")
+    software_length = body[hardware_end]
+    software_start = hardware_end + 1
+    software_end = software_start + software_length
+    if software_end + 2 != len(body):
+        raise MessageError("invalid terminal software version length")
+    return TerminalAttributes(
+        terminal_phone=frame.terminal_phone,
+        terminal_type=int.from_bytes(body[0:2], "big"),
+        manufacturer_id=_decode_registration_text(body[2:7], "manufacturer ID"),
+        terminal_model=_decode_registration_text(body[7:37], "terminal model"),
+        terminal_id=_decode_registration_text(body[37:67], "terminal ID"),
+        iccid=_digits_from_bcd(body[67:77], "terminal ICCID"),
+        hardware_version=_decode_registration_text(
+            body[78:hardware_end], "hardware version"
         ),
-        asset_id=text(REG_TLV_ASSET_ID, "asset ID", max_bytes=64),
-        terminal_model=text(
-            REG_TLV_TERMINAL_MODEL, "terminal model", required=True, max_bytes=30
+        software_version=_decode_registration_text(
+            body[software_start:software_end], "software version"
         ),
-        terminal_sn=text(
-            REG_TLV_TERMINAL_SN, "terminal SN", required=True, max_bytes=32
-        ),
-        imei=imei,
-        iccid=iccid,
-        hardware_version=text(
-            REG_TLV_HARDWARE_VERSION, "hardware version", max_bytes=16
-        ),
-        software_version=text(
-            REG_TLV_SOFTWARE_VERSION, "software version", max_bytes=32
-        ),
-        organization_code=text(
-            REG_TLV_ORGANIZATION, "organization code", max_bytes=32
-        ),
-        production_batch=text(
-            REG_TLV_PRODUCTION_BATCH, "production batch", max_bytes=32
-        ),
-        profile_revision=int.from_bytes(revision_raw, "big"),
+        gnss_attributes=body[software_end],
+        communication_attributes=body[software_end + 1],
     )
 
 
@@ -449,16 +406,9 @@ def _parameter_item(parameter_id: int, value: bytes) -> bytes:
 
 
 def configuration_parameter_values(config: TerminalConfiguration) -> dict[int, bytes]:
-    """Encode the complete mutable project profile using 808 parameter items."""
+    """Encode only standard parameter 0x0029 (default timed report interval)."""
     return {
-        PARAM_PROFILE_REVISION: config.revision.to_bytes(4, "big"),
         PARAM_REPORT_INTERVAL: config.report_interval_sec.to_bytes(4, "big"),
-        PARAM_PROVINCE_ID: config.province_id.to_bytes(2, "big"),
-        PARAM_CITY_ID: config.city_id.to_bytes(2, "big"),
-        PARAM_TERMINAL_TYPE: bytes([config.terminal_type]),
-        PARAM_SERVICE_POINT: config.service_point_id.encode("utf-8"),
-        PARAM_ASSET_ID: config.asset_id.encode("utf-8"),
-        PARAM_ORGANIZATION: config.organization_code.encode("utf-8"),
     }
 
 
@@ -488,6 +438,15 @@ def build_query_parameters(
         parameter_id.to_bytes(4, "big") for parameter_id in parameter_ids
     )
     return build_frame(MSG_QUERY_PARAMETERS, terminal_phone, platform_serial, body)
+
+
+def build_query_terminal_attributes(
+    terminal_phone: str, platform_serial: int
+) -> bytes:
+    """Build the standard empty-body 0x8107 terminal attribute query."""
+    return build_frame(
+        MSG_QUERY_TERMINAL_ATTRIBUTES, terminal_phone, platform_serial, b""
+    )
 
 
 def parse_terminal_common_response(frame: JT808Frame) -> TerminalCommonResponse:
@@ -532,15 +491,9 @@ def decode_location_message(frame: JT808Frame) -> TrackerBatch:
     records = tuple(_decode_location_body(body) for body in bodies)
     if not records:
         raise MessageError("location batch must not be empty")
-    generations = {record.generation_id for record in records}
-    if len(generations) != 1 or None in generations:
-        raise MessageError("location batch mixes generation IDs")
-    generation_id = generations.pop()
-    assert generation_id is not None
     return TrackerBatch(
         imei=frame.terminal_phone,
-        generation_id=generation_id,
-        batch_id=records[-1].sequence,
+        batch_id=frame.message_serial,
         records=records,
         message_id=frame.message_id,
         message_serial=frame.message_serial,
@@ -584,17 +537,11 @@ def _decode_location_body(body: bytes) -> TrackerRecord:
     if status & 0x08:
         longitude = -longitude
     extras = _decode_extras(body[28:])
-    identity = extras.get(EXTRA_RECORD_ID)
     power = extras.get(EXTRA_BATTERY)
-    if identity is None or len(identity) != 10 or identity[0] != 1:
-        raise MessageError("location is missing tracker record identity 0xE0")
-    if power is None or len(power) != 3:
-        raise MessageError("location is missing battery information 0xE1")
-    generation = int.from_bytes(identity[1:5], "big")
-    sequence = int.from_bytes(identity[5:9], "big")
-    flags = identity[9]
-    battery_mv = int.from_bytes(power[0:2], "big") or None
-    battery_percent = None if power[2] == 0xFF else power[2]
+    if power is not None and len(power) != 3:
+        raise MessageError("invalid battery extension 0xE1")
+    battery_mv = int.from_bytes(power[0:2], "big") or None if power else None
+    battery_percent = None if power is None or power[2] == 0xFF else power[2]
     if battery_percent is not None and battery_percent > 100:
         raise MessageError("battery percentage exceeds 100")
     signal = extras.get(EXTRA_SIGNAL, b"\x00")
@@ -604,9 +551,9 @@ def _decode_location_body(body: bytes) -> TrackerRecord:
         raise MessageError("invalid signal, satellite, or HDOP extension")
     gps_time = _decode_bcd_time(body[22:28])
     return TrackerRecord(
-        sequence=sequence,
         gps_time=gps_time,
-        time_valid=bool(flags & 0x01),
+        # Standard 0x0200 has no source/validity flag for its BCD timestamp.
+        time_valid=None,
         valid=valid,
         latitude=latitude if valid else None,
         longitude=longitude if valid else None,
@@ -618,9 +565,9 @@ def _decode_location_body(body: bytes) -> TrackerRecord:
         csq=signal[0],
         battery_mv=battery_mv,
         battery_percent=battery_percent,
-        wake_code=(flags >> 1) & 0x07,
+        wake_code=0,
         raw_data=body.hex().upper(),
-        generation_id=generation,
+        record_fingerprint=hashlib.sha256(body).hexdigest(),
     )
 def _decode_extras(data: bytes) -> dict[int, bytes]:
     extras: dict[int, bytes] = {}

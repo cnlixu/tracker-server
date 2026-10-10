@@ -40,26 +40,25 @@ CREATE TABLE IF NOT EXISTS jt808_terminals (
     CHECK (auth_code_hash ~ '^[0-9a-f]{64}$')
 );
 
--- EPTR is the project-specific registration body carried by standard 0x0100.
--- Legacy vehicle-registration columns remain for migration compatibility only.
-ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS profile_magic VARCHAR(4) NOT NULL DEFAULT 'EPTR';
-ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS profile_version SMALLINT NOT NULL DEFAULT 1;
-ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS terminal_type SMALLINT NOT NULL DEFAULT 4;
-ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS capabilities BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS report_interval_sec INTEGER NOT NULL DEFAULT 900;
-ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS service_point_id VARCHAR(32) NOT NULL DEFAULT '';
-ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS asset_id VARCHAR(64) NOT NULL DEFAULT '';
-ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS terminal_sn VARCHAR(32) NOT NULL DEFAULT '';
+-- Standard 0x0107 attributes are separate from 0x0100 registration fields.
+-- An upgraded local database may retain old EPTR columns, but current code
+-- never reads or writes them and a fresh database does not create them.
+ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS terminal_type SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE jt808_terminals ALTER COLUMN terminal_type SET DEFAULT 0;
 ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS iccid VARCHAR(22) NOT NULL DEFAULT '';
 ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS hardware_version VARCHAR(16) NOT NULL DEFAULT '';
 ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS software_version VARCHAR(32) NOT NULL DEFAULT '';
-ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS organization_code VARCHAR(32) NOT NULL DEFAULT '';
-ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS production_batch VARCHAR(32) NOT NULL DEFAULT '';
-ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS profile_revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS attribute_manufacturer_id VARCHAR(5) NOT NULL DEFAULT '';
+ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS attribute_terminal_model VARCHAR(30) NOT NULL DEFAULT '';
+ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS attribute_terminal_id VARCHAR(30) NOT NULL DEFAULT '';
+ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS gnss_attributes SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS communication_attributes SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE jt808_terminals ADD COLUMN IF NOT EXISTS attributes_updated_at TIMESTAMPTZ;
 
 -- Desired/applied copies make parameter delivery durable across PSM+ sessions.
 -- A configuration is pending until the terminal returns 0x0001 success for
--- the exact 0x8103 platform serial and revision.
+-- the exact 0x8103 platform serial. Revisions below are local server state and
+-- are never encoded as JT/T 808 terminal parameters.
 CREATE TABLE IF NOT EXISTS jt808_terminal_configs (
     terminal_phone VARCHAR(20) PRIMARY KEY
         REFERENCES jt808_terminals(terminal_phone) ON DELETE CASCADE,
@@ -98,12 +97,13 @@ CREATE TABLE IF NOT EXISTS track_points (
 CREATE INDEX IF NOT EXISTS idx_track_points_imei_gps_time
     ON track_points (imei, gps_time);
 
--- JT/T 808 custom extension 0xE0 carries a per-record identity, so the server
--- remains idempotent when a device re-sends after a lost acknowledgement.
--- Speed remains stored in knots for compatibility with existing application data.
+-- Legacy identity columns are retained for compatibility with an existing test
+-- database. Current devices send no custom record identity. The test server
+-- hashes the complete standard location body for best-effort idempotency.
 ALTER TABLE track_points ADD COLUMN IF NOT EXISTS generation_id BIGINT;
 ALTER TABLE track_points ADD COLUMN IF NOT EXISTS record_seq BIGINT;
 ALTER TABLE track_points ADD COLUMN IF NOT EXISTS batch_id BIGINT;
+ALTER TABLE track_points ADD COLUMN IF NOT EXISTS record_fingerprint CHAR(64);
 ALTER TABLE track_points ADD COLUMN IF NOT EXISTS battery_mv INTEGER;
 ALTER TABLE track_points ADD COLUMN IF NOT EXISTS battery_percent SMALLINT;
 ALTER TABLE track_points ADD COLUMN IF NOT EXISTS time_valid BOOLEAN;
@@ -114,3 +114,6 @@ ALTER TABLE devices ADD COLUMN IF NOT EXISTS last_battery_percent SMALLINT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_track_points_record_identity
     ON track_points (imei, generation_id, record_seq);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_track_points_record_fingerprint
+    ON track_points (imei, record_fingerprint);

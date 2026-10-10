@@ -16,10 +16,11 @@ from .database import (
     mark_terminal_authenticated,
     mark_terminal_configuration_sent,
     save_records,
+    save_terminal_attributes,
     save_terminal_registration,
 )
 from .jt808_protocol import TrackerBatch
-from .models import TerminalConfiguration, TerminalRegistration
+from .models import TerminalAttributes, TerminalConfiguration, TerminalRegistration
 
 
 @dataclass(slots=True)
@@ -68,10 +69,13 @@ class TrackerService:
         return await save_records(
             self.pool,
             imei=batch.imei,
-            generation_id=batch.generation_id,
             batch_id=batch.batch_id,
             records=batch.records,
         )
+
+    async def store_terminal_attributes(self, attributes: TerminalAttributes) -> bool:
+        """Persist the latest standard 0x0107 terminal attributes."""
+        return await save_terminal_attributes(self.pool, attributes)
 
     async def get_pending_configuration(
         self,

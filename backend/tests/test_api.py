@@ -299,13 +299,7 @@ def test_terminal_configuration_update_creates_pending_revision(monkeypatch: Any
             revision=3,
             applied_revision=3,
             status="applied",
-            province_id=43,
-            city_id=4301,
-            terminal_type=4,
             report_interval_sec=900,
-            service_point_id="SP-001",
-            asset_id="ASSET-001",
-            organization_code="ORG-01",
         )
 
     async def fake_update(
@@ -318,13 +312,7 @@ def test_terminal_configuration_update_creates_pending_revision(monkeypatch: Any
             revision=4,
             applied_revision=3,
             status="pending",
-            province_id=value.province_id,
-            city_id=value.city_id,
-            terminal_type=value.terminal_type,
             report_interval_sec=int(changes["report_interval_sec"]),
-            service_point_id=value.service_point_id,
-            asset_id=value.asset_id,
-            organization_code=value.organization_code,
         )
 
     monkeypatch.setattr(api_module, "get_terminal_configuration", fake_get)
@@ -348,7 +336,7 @@ def test_terminal_configuration_update_creates_pending_revision(monkeypatch: Any
     }
 
 
-def test_terminal_registration_endpoint_exposes_profile_without_secret(
+def test_terminal_registration_endpoint_exposes_standard_fields_without_secret(
     monkeypatch: Any,
 ) -> None:
     async def fake_registration(
@@ -360,25 +348,24 @@ def test_terminal_registration_endpoint_exposes_profile_without_secret(
             imei=IMEI,
             province_id=43,
             city_id=4301,
-            manufacturer_id="JZG43",
-            profile_magic="EPTR",
-            profile_version=1,
-            terminal_type=4,
-            capabilities=0x135F,
-            report_interval_sec=300,
-            service_point_id="SP-001",
-            asset_id="ASSET-001",
+            manufacturer_id="JZG043",
             terminal_model="JZG043A",
-            terminal_sn=IMEI,
+            terminal_id="89860064221642652497",
+            plate_color=0,
+            plate_number="0",
+            terminal_type=0,
+            attribute_manufacturer_id="JZG43",
+            attribute_terminal_model="JZG043A",
+            attribute_terminal_id=IMEI,
             iccid="89860064221642652497",
             hardware_version="Air780EGP",
             software_version="001.999.015",
-            organization_code="ORG-01",
-            production_batch="202610",
-            profile_revision=0,
+            gnss_attributes=0x0F,
+            communication_attributes=0xA0,
             registered_at=NOW - timedelta(minutes=5),
             last_registered_at=NOW - timedelta(minutes=1),
             last_authenticated_at=NOW,
+            attributes_updated_at=NOW,
         )
 
     monkeypatch.setattr(api_module, "get_terminal_registration", fake_registration)
@@ -391,8 +378,8 @@ def test_terminal_registration_endpoint_exposes_profile_without_secret(
     body = response.json()
     assert body["terminal_phone"] == "18508225213"
     assert body["iccid"] == "89860064221642652497"
-    assert body["capabilities"] == 0x135F
-    assert body["report_interval_sec"] == 300
+    assert body["terminal_id"] == "89860064221642652497"
+    assert body["attribute_terminal_id"] == IMEI
     assert "auth_code" not in body
     assert "auth_code_hash" not in body
 

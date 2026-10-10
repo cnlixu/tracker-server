@@ -34,25 +34,25 @@
     wakeCode: document.querySelector("#wake-code"),
     registrationPhone: document.querySelector("#registration-phone"),
     registrationIccid: document.querySelector("#registration-iccid"),
-    registrationTerminalSn: document.querySelector("#registration-terminal-sn"),
+    registrationTerminalId: document.querySelector("#registration-terminal-id"),
     registrationProvince: document.querySelector("#registration-province"),
     registrationCity: document.querySelector("#registration-city"),
     registrationManufacturer: document.querySelector("#registration-manufacturer"),
     registrationModel: document.querySelector("#registration-model"),
+    registrationPlateColor: document.querySelector("#registration-plate-color"),
+    registrationPlateNumber: document.querySelector("#registration-plate-number"),
     registrationType: document.querySelector("#registration-type"),
-    registrationCapabilities: document.querySelector("#registration-capabilities"),
-    registrationInterval: document.querySelector("#registration-interval"),
-    registrationServicePoint: document.querySelector("#registration-service-point"),
-    registrationAsset: document.querySelector("#registration-asset"),
+    registrationAttributeManufacturer: document.querySelector("#registration-attribute-manufacturer"),
+    registrationAttributeModel: document.querySelector("#registration-attribute-model"),
+    registrationAttributeTerminalId: document.querySelector("#registration-attribute-terminal-id"),
     registrationHardware: document.querySelector("#registration-hardware"),
     registrationSoftware: document.querySelector("#registration-software"),
-    registrationOrganization: document.querySelector("#registration-organization"),
-    registrationProductionBatch: document.querySelector("#registration-production-batch"),
-    registrationProfile: document.querySelector("#registration-profile"),
-    registrationRevision: document.querySelector("#registration-revision"),
+    registrationGnss: document.querySelector("#registration-gnss"),
+    registrationCommunication: document.querySelector("#registration-communication"),
     registrationCreated: document.querySelector("#registration-created"),
     registrationUpdated: document.querySelector("#registration-updated"),
     registrationAuthenticated: document.querySelector("#registration-authenticated"),
+    registrationAttributesUpdated: document.querySelector("#registration-attributes-updated"),
     trackCount: document.querySelector("#track-count"),
     trackStartTime: document.querySelector("#track-start-time"),
     trackEndTime: document.querySelector("#track-end-time"),
@@ -281,16 +281,17 @@
   function registrationElements() {
     return [
       elements.registrationPhone, elements.registrationIccid,
-      elements.registrationTerminalSn, elements.registrationProvince,
+      elements.registrationTerminalId, elements.registrationProvince,
       elements.registrationCity, elements.registrationManufacturer,
-      elements.registrationModel, elements.registrationType,
-      elements.registrationCapabilities, elements.registrationInterval,
-      elements.registrationServicePoint, elements.registrationAsset,
+      elements.registrationModel, elements.registrationPlateColor,
+      elements.registrationPlateNumber, elements.registrationType,
+      elements.registrationAttributeManufacturer,
+      elements.registrationAttributeModel,
+      elements.registrationAttributeTerminalId,
       elements.registrationHardware, elements.registrationSoftware,
-      elements.registrationOrganization, elements.registrationProductionBatch,
-      elements.registrationProfile, elements.registrationRevision,
+      elements.registrationGnss, elements.registrationCommunication,
       elements.registrationCreated, elements.registrationUpdated,
-      elements.registrationAuthenticated,
+      elements.registrationAuthenticated, elements.registrationAttributesUpdated,
     ];
   }
 
@@ -309,29 +310,29 @@
     }
     elements.registrationPhone.textContent = displayText(registration.terminal_phone);
     elements.registrationIccid.textContent = displayText(registration.iccid);
-    elements.registrationTerminalSn.textContent = displayText(registration.terminal_sn);
+    elements.registrationTerminalId.textContent = displayText(registration.terminal_id);
     elements.registrationProvince.textContent = displayText(registration.province_id);
     elements.registrationCity.textContent = displayText(registration.city_id);
     elements.registrationManufacturer.textContent = displayText(registration.manufacturer_id);
     elements.registrationModel.textContent = displayText(registration.terminal_model);
+    elements.registrationPlateColor.textContent = displayText(registration.plate_color);
+    elements.registrationPlateNumber.textContent = displayText(registration.plate_number);
     elements.registrationType.textContent = displayText(registration.terminal_type);
-    const capabilities = finiteNumber(registration.capabilities);
-    elements.registrationCapabilities.textContent = capabilities === null
-      ? "—" : `0x${Math.trunc(capabilities).toString(16).toUpperCase().padStart(8, "0")}`;
-    const interval = finiteNumber(registration.report_interval_sec);
-    elements.registrationInterval.textContent = interval === null
-      ? "—" : `${Math.trunc(interval)} 秒`;
-    elements.registrationServicePoint.textContent = displayText(registration.service_point_id);
-    elements.registrationAsset.textContent = displayText(registration.asset_id);
+    elements.registrationAttributeManufacturer.textContent = displayText(registration.attribute_manufacturer_id);
+    elements.registrationAttributeModel.textContent = displayText(registration.attribute_terminal_model);
+    elements.registrationAttributeTerminalId.textContent = displayText(registration.attribute_terminal_id);
     elements.registrationHardware.textContent = displayText(registration.hardware_version);
     elements.registrationSoftware.textContent = displayText(registration.software_version);
-    elements.registrationOrganization.textContent = displayText(registration.organization_code);
-    elements.registrationProductionBatch.textContent = displayText(registration.production_batch);
-    elements.registrationProfile.textContent = `${displayText(registration.profile_magic)} v${displayText(registration.profile_version)}`;
-    elements.registrationRevision.textContent = displayText(registration.profile_revision);
+    const gnss = finiteNumber(registration.gnss_attributes);
+    elements.registrationGnss.textContent = gnss === null
+      ? "—" : `0x${Math.trunc(gnss).toString(16).toUpperCase().padStart(2, "0")}`;
+    const communication = finiteNumber(registration.communication_attributes);
+    elements.registrationCommunication.textContent = communication === null
+      ? "—" : `0x${Math.trunc(communication).toString(16).toUpperCase().padStart(2, "0")}`;
     elements.registrationCreated.textContent = formatBeijingTime(registration.registered_at);
     elements.registrationUpdated.textContent = formatBeijingTime(registration.last_registered_at);
     elements.registrationAuthenticated.textContent = formatBeijingTime(registration.last_authenticated_at);
+    elements.registrationAttributesUpdated.textContent = formatBeijingTime(registration.attributes_updated_at);
   }
 
   function renderDevice(device) {
