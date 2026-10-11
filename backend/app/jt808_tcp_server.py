@@ -243,12 +243,6 @@ class TrackerTCPServer:
                 response = parse_terminal_parameter_response(frame)
             except MessageError as exc:
                 LOGGER.warning("invalid parameter response client=%s error=%s", peer, exc)
-                await _write(
-                    writer,
-                    build_common_response(
-                        frame, self._allocate_platform_serial(), result=2
-                    ),
-                )
             else:
                 LOGGER.info(
                     "terminal parameters client=%s response_serial=%s count=%s",
@@ -256,12 +250,8 @@ class TrackerTCPServer:
                     response.response_serial,
                     len(response.parameters),
                 )
-                await _write(
-                    writer,
-                    build_common_response(
-                        frame, self._allocate_platform_serial(), result=0
-                    ),
-                )
+            # 0x0104 is the dedicated response to 0x8104/0x8106. Sending an
+            # additional 0x8001 would create a non-standard ACK chain.
             return
         if frame.message_id == MSG_TERMINAL_ATTRIBUTES:
             await self._handle_terminal_attributes(frame, writer, peer)
@@ -452,12 +442,8 @@ class TrackerTCPServer:
             attributes.terminal_id,
             stored,
         )
-        await _write(
-            writer,
-            build_common_response(
-                frame, self._allocate_platform_serial(), result=0 if stored else 1
-            ),
-        )
+        # 0x0107 is the dedicated response to 0x8107 and is not followed by
+        # a platform common response.
 
     async def _send_pending_configuration(
         self,

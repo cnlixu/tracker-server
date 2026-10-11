@@ -188,8 +188,9 @@ def test_authentication_is_required_and_ack_follows_persistence() -> None:
             "test",
         )
         assert service.attributes[0].iccid == "89860064221642652497"
-        attributes_ack = decode_frame(bytes(writer.output))
-        assert attributes_ack.body == struct.pack(">HHB", 3, MSG_TERMINAL_ATTRIBUTES, 0)
+        # 0x0107 is the dedicated response to 0x8107, not a request that
+        # triggers an additional platform 0x8001 response.
+        assert bytes(writer.output) == b""
 
         writer.output.clear()
         parameter_body = struct.pack(">HBIBI", 0x2345, 1, 0x00000029, 4, 900)
@@ -199,10 +200,8 @@ def test_authentication_is_required_and_ack_follows_persistence() -> None:
             state,
             "test",
         )
-        parameter_ack = decode_frame(bytes(writer.output))
-        assert parameter_ack.body == struct.pack(
-            ">HHB", 4, MSG_TERMINAL_PARAMETERS, 0
-        )
+        # 0x0104 completes the 0x8104/0x8106 exchange by itself.
+        assert bytes(writer.output) == b""
 
         writer.output.clear()
         await server._handle_frame(
@@ -215,7 +214,7 @@ def test_authentication_is_required_and_ack_follows_persistence() -> None:
         assert service.batches[0].imei == IMEI
         assert service.batches[0].records[0].battery_percent == 25
         location_ack = decode_frame(bytes(writer.output))
-        assert location_ack.message_serial == 5
+        assert location_ack.message_serial == 3
         assert location_ack.body == struct.pack(">HHB", 100, MSG_LOCATION, 0)
 
     asyncio.run(scenario())
